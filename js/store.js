@@ -1,6 +1,13 @@
+import { uid, download } from './util.js';
+import { createLibrary } from './storage.js';
+import { validateQuizShape, parseLibrary } from './schema.js';
+import { MAX_FILE_BYTES, MAX_LIBRARY_BYTES } from './config.js';
 'use strict';
 
-const LS_KEY = 'quizparty.quizzes.v1';
+export const library = createLibrary({
+  storage: () => localStorage, seed: () => [sampleQuiz()],
+  notify: detail => document.dispatchEvent(new CustomEvent('storage-status', { detail })),
+});
 
 function sampleQuiz() {
   const q = (text, answers, correct, time = 20) => ({
@@ -11,30 +18,19 @@ function sampleQuiz() {
   });
   return {
     id: uid(),
-    title: 'Demo: General Knowledge',
+    title: 'Ejemplo: cultura general',
     questions: [
-      q('What is the largest planet in our solar system?', ['Jupiter', 'Saturn', 'Earth', 'Neptune'], [0]),
-      q('Which of these are primary colors of light?', ['Red', 'Green', 'Yellow', 'Blue'], [0, 1, 3]),
-      q('The Great Wall is located in…', ['Japan', 'China'], [1], 10),
-      q('How many continents are there?', ['5', '6', '7', '8'], [2], 10),
-      q('Which language runs natively in web browsers?', ['Python', 'JavaScript', 'C++', 'Java'], [1]),
+      q('¿Cuál es el planeta más grande del sistema solar?', ['Júpiter', 'Saturno', 'Tierra', 'Neptuno'], [0]),
+      q('¿Cuál de estos es un color primario de la luz?', ['Rojo', 'Verde', 'Amarillo', 'Azul'], [0, 1, 3]),
+      q('La Gran Muralla se encuentra en…', ['Japón', 'China'], [1], 10),
+      q('¿Cuántos continentes hay en el modelo de siete continentes?', ['5', '6', '7', '8'], [2], 10),
+      q('¿Qué lenguaje se ejecuta de forma nativa en los navegadores web?', ['Python', 'JavaScript', 'C++', 'Java'], [1]),
     ],
   };
 }
 
-function getQuizzes() {
-  try {
-    const raw = localStorage.getItem(LS_KEY);
-    if (raw) return JSON.parse(raw);
-  } catch (e) { /* corrupted storage — reseed */ }
-  const seed = [sampleQuiz()];
-  saveQuizzes(seed);
-  return seed;
-}
-
-function saveQuizzes(quizzes) {
-  localStorage.setItem(LS_KEY, JSON.stringify(quizzes));
-}
+function getQuizzes() { return library.get(); }
+function saveQuizzes(quizzes) { return library.save(quizzes); }
 
 function getQuiz(id) {
   return getQuizzes().find(q => q.id === id) || null;
@@ -70,14 +66,14 @@ function newQuiz() {
 /* Returns a list of human-readable problems; empty list = ready to host. */
 function validateQuiz(quiz) {
   const problems = [];
-  if (!quiz.title.trim()) problems.push('• The quiz needs a title.');
-  if (!quiz.questions.length) problems.push('• Add at least one question.');
+  if (!quiz.title.trim()) problems.push('• El cuestionario necesita un título.');
+  if (!quiz.questions.length) problems.push('• Añade al menos una pregunta.');
   quiz.questions.forEach((q, i) => {
     const n = i + 1;
-    if (!q.text.trim()) problems.push(`• Question ${n} has no text.`);
+    if (!q.text.trim()) problems.push(`• La pregunta ${n} no tiene enunciado.`);
     const filled = q.answers.filter(a => a.text.trim());
-    if (filled.length < 2) problems.push(`• Question ${n} needs at least 2 answers.`);
-    if (!q.answers.some(a => a.correct && a.text.trim())) problems.push(`• Question ${n} has no correct answer marked.`);
+    if (filled.length < 2) problems.push(`• La pregunta ${n} necesita al menos 2 respuestas.`);
+    if (!q.answers.some(a => a.correct && a.text.trim())) problems.push(`• La pregunta ${n} no tiene ninguna respuesta correcta marcada.`);
   });
   return problems;
 }
@@ -94,34 +90,29 @@ function normalizeQuiz(quiz) {
 }
 
 function importQuizJson(text) {
-  const data = JSON.parse(text);
-  if (!data || typeof data.title !== 'string' || !Array.isArray(data.questions)) {
-    throw new Error('Not a QuizParty quiz file');
-  }
-  const quiz = {
-    id: uid(),
-    title: String(data.title).slice(0, 80),
-    questions: data.questions.map(q => ({
-      text: String(q.text || '').slice(0, 200),
-      answers: (Array.isArray(q.answers) ? q.answers : []).slice(0, 4).map(a => ({
-        text: String(a.text || '').slice(0, 100),
-        correct: !!a.correct,
-      })),
-      time: [5, 10, 20, 30, 60, 90].includes(+q.time) ? +q.time : 20,
-      points: ['standard', 'double', 'none'].includes(q.points) ? q.points : 'standard',
-    })),
-  };
-  if (!quiz.questions.length) throw new Error('Quiz has no questions');
-  return quiz;
+  if (new TextEncoder().encode(text).length > MAX_FILE_BYTES) throw new Error('El archivo supera el límite de 2 MB.');
+  let data;
+  try { data = JSON.parse(text); } catch { throw new Error('El archivo no contiene JSON válido.'); }
+  if (!validateQuizShape(data)) throw new Error('Cuestionario no válido: revisa preguntas, respuestas, tiempos y puntos.');
+  return { id: uid(), title: data.title, questions: data.questions.map(q => ({
+    text: q.text, time: q.time, points: q.points,
+    answers: q.answers.map(a => ({ text: a.text, correct: a.correct })),
+  })) };
 }
-
+function importFile(text) {
+  if (new TextEncoder().encode(text).length > MAX_LIBRARY_BYTES) throw new Error('El archivo supera el límite de 20 MB para bibliotecas.');
+  let data;
+  try { data = JSON.parse(text); } catch { throw new Error('El archivo no contiene JSON válido.'); }
+  const incoming = Array.isArray(data) || data?.version !== undefined
+    ? parseLibrary(text).map(q => ({ ...q, id: uid() })) : [importQuizJson(text)];
+  saveQuizzes([...getQuizzes(), ...incoming]);
+}
 function exportQuiz(quiz) {
   const clean = normalizeQuiz(quiz);
   delete clean.id;
-  const blob = new Blob([JSON.stringify(clean, null, 2)], { type: 'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = (quiz.title.trim() || 'quiz').replace(/[^\w\- ]+/g, '').replace(/ +/g, '-').toLowerCase() + '.quizparty.json';
-  a.click();
-  URL.revokeObjectURL(a.href);
+  const filename = (quiz.title.trim() || 'cuestionario').normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '').replace(/[^\w\- ]+/g, '').replace(/ +/g, '-').toLowerCase() || 'cuestionario';
+  download(JSON.stringify(clean, null, 2), filename + '.quizparty.json');
 }
+
+export { sampleQuiz, getQuizzes, saveQuizzes, getQuiz, upsertQuiz, deleteQuiz, blankQuestion, newQuiz, validateQuiz, normalizeQuiz, importQuizJson, importFile, exportQuiz };

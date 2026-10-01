@@ -1,3 +1,9 @@
+import { $, esc, SHAPES, showView, showSub, joinUrl } from './util.js';
+import { getQuiz, validateQuiz, normalizeQuiz } from './store.js';
+import { setCleanup, setLeaveGuard } from './navigation.js';
+import { NETWORK, PEER_PREFIX, GRACE_MS, MAX_PLAYERS, CONNECT_TIMEOUT_MS } from './config.js';
+import { secret, validClientMessage, send } from './protocol.js';
+import { scoreAnswer } from './scoring.js';
 'use strict';
 
 /* The host's browser IS the game server. It opens a PeerJS peer whose id encodes
@@ -5,25 +11,33 @@
 
 let hostGame = null;
 
-function startHost(quizId) {
+export function startHost(quizId) {
   const stored = getQuiz(quizId);
   if (!stored) { location.hash = 'library'; return; }
   const problems = validateQuiz(stored);
   if (problems.length) {
-    alert('Fix this before hosting:\n\n' + problems.join('\n'));
+    alert('Corrige lo siguiente antes de organizar la partida:\n\n' + problems.join('\n'));
     location.hash = 'editor/' + stored.id;
     return;
   }
   showView('view-host');
   hostGame = new HostGame(normalizeQuiz(stored));
   hostGame.openRoom();
+  setLeaveGuard(() => !hostGame || hostGame.destroyed || hostGame.phase === 'end' || confirm('¿Salir de la sala? La partida terminará para todos.'));
   setCleanup(() => { if (hostGame) { hostGame.destroy(); hostGame = null; } });
 }
 
-class HostGame {
-  constructor(quiz) {
+export class HostGame {
+  constructor(quiz, { now = () => performance.now(), createPeer = (id, options) => new globalThis.Peer(id, options) } = {}) {
     this.quiz = quiz;
-    this.players = new Map();   // conn.connectionId -> {conn, name, score, streak, choice, answerMs}
+    this.now = now;
+    this.createPeer = createPeer;
+    this.connections = new Map();
+    this.opened = false;
+    this.retryTimer = null;
+    this.beforeUnload = e => { if (!this.destroyed && this.phase !== 'end') { e.preventDefault(); e.returnValue = ''; } };
+    window.addEventListener('beforeunload', this.beforeUnload);
+    this.players = new Map();   // session id -> retained player state
     this.qIndex = -1;
     this.phase = 'lobby';
     this.peer = null;
@@ -35,77 +49,176 @@ class HostGame {
   /* ---------- room / connections ---------- */
 
   openRoom() {
-    this.pin = String(Math.floor(100000 + Math.random() * 900000));
+    this.pin = String(Math.floor(100000 + crypto.getRandomValues(new Uint32Array(1))[0] / 4294967296 * 900000));
     showSub('view-host', 'host-connecting');
-    const peer = new Peer(PEER_PREFIX + this.pin, { debug: 1 });
+    let peer;
+    try { peer = this.createPeer(PEER_PREFIX + this.pin, NETWORK); }
+    catch { this.fatal('No se ha podido iniciar la conexión. Recarga la página y comprueba tu conexión.'); return; }
     this.peer = peer;
-    peer.on('open', () => this.renderLobby());
+    this.openTimer = setTimeout(() => { if (!this.opened) this.fatal('No se ha podido abrir la sala. Comprueba tu conexión y vuelve a intentarlo.'); }, CONNECT_TIMEOUT_MS);
+    peer.on('open', () => {
+      if (this.destroyed || this.peer !== peer) return;
+      clearTimeout(this.openTimer);
+      clearTimeout(this.retryTimer);
+      $('#host-network').textContent = '';
+      if (!this.opened) { this.opened = true; this.renderLobby(); }
+    });
     peer.on('connection', conn => this.onConnection(conn));
     peer.on('error', err => {
-      if (this.destroyed) return;
-      if (err.type === 'unavailable-id' && this.idTries++ < 4) {
+      if (this.destroyed || this.peer !== peer) return;
+      if (!this.opened && err.type === 'unavailable-id' && this.idTries++ < 4) {
+        clearTimeout(this.openTimer);
         peer.destroy();
         this.openRoom();               // PIN collision — roll a new one
       } else if (err.type === 'peer-unavailable') {
         /* a player vanished mid-handshake; harmless */
+      } else if (this.opened) {
+        this.scheduleReconnect();
       } else {
-        this.fatal(`Could not reach the signaling service (${err.type}). Check your internet connection and try again.`);
+        this.fatal(`No se ha podido contactar con el servicio de señalización (${err.type}). Comprueba tu conexión a Internet y vuelve a intentarlo.`);
       }
     });
     peer.on('disconnected', () => {
-      if (!this.destroyed) peer.reconnect();  // keep the room joinable
+      if (!this.destroyed && this.peer === peer) this.scheduleReconnect();
     });
   }
 
   fatal(msg) {
+    this.destroy();
     $('#host-error-msg').textContent = msg;
     showSub('view-host', 'host-error');
   }
 
-  onConnection(conn) {
-    conn.on('data', d => this.onMessage(conn, d));
-    conn.on('close', () => {
-      if (this.players.delete(conn.connectionId)) {
-        if (this.phase === 'lobby') this.renderPlayerChips();
-        if (this.phase === 'question') this.checkAllAnswered();
+  scheduleReconnect() {
+    $('#host-network').textContent = 'Señalización desconectada. La partida continúa; intentando restablecer el acceso a la sala…';
+    clearTimeout(this.retryTimer);
+    this.retryTimer = setTimeout(() => {
+      if (this.destroyed) return;
+      if (this.peer.disconnected && !this.peer.destroyed) {
+        try { this.peer.reconnect(); } catch { /* retry while the room remains alive */ }
       }
+      if (this.peer.disconnected) this.scheduleReconnect();
+    }, 2000);
+  }
+
+  onConnection(conn) {
+    if (this.destroyed) { conn.close(); return; }
+    if (this.connections.size >= MAX_PLAYERS * 2) { conn.close(); return; }
+    const state = { conn, player: null, messages: 0, since: this.now() };
+    this.connections.set(conn, state);
+    state.timeout = setTimeout(() => conn.close(), CONNECT_TIMEOUT_MS);
+    conn.on('data', d => {
+      if (!this.connections.has(conn) || state.rejected) return;
+      const now = this.now();
+      if (now - state.since >= 1000) { state.messages = 0; state.since = now; }
+      if (++state.messages > 30 || !validClientMessage(d)) { conn.close(); return; }
+      this.onMessage(conn, d);
     });
+    const closed = () => {
+      clearTimeout(state.timeout);
+      this.connections.delete(conn);
+      const p = state.player;
+      if (!p || p.conn !== conn || this.players.get(p.id) !== p || this.destroyed) return;
+      p.conn = null;
+      p.expiresAt = this.now() + GRACE_MS;
+      clearTimeout(p.expiryTimer);
+      p.expiryTimer = setTimeout(() => this.expirePlayer(p), GRACE_MS);
+      if (this.phase === 'lobby') this.renderPlayerChips();
+    };
+    conn.on('close', closed);
+    conn.on('error', () => { closed(); conn.close(); });
+  }
+
+  expirePlayer(p) {
+    if (p.conn || this.players.get(p.id) !== p) return;
+    this.players.delete(p.id);
+    if (this.phase === 'lobby') this.renderPlayerChips();
+    if (this.phase === 'question') this.checkAllAnswered();
   }
 
   onMessage(conn, d) {
-    if (!d || typeof d !== 'object') return;
+    if (!validClientMessage(d)) return;
     if (d.t === 'join') this.handleJoin(conn, d);
     else if (d.t === 'a') this.handleAnswer(conn, d);
+    else if (d.t === 'ping') send(conn, { t: 'pong', seq: d.seq });
+  }
+
+  reject(conn, reason) {
+    send(conn, { t: 'kick', reason });
+    const state = this.connections.get(conn);
+    if (state) { state.rejected = true; clearTimeout(state.timeout); state.timeout = setTimeout(() => conn.close(), 200); }
   }
 
   handleJoin(conn, d) {
-    let name = String(d.name || '').trim().slice(0, 20);
-    if (!name) { conn.send({ t: 'kick', reason: 'Please pick a nickname.' }); return; }
-    const taken = new Set([...this.players.values()].map(p => p.name.toLowerCase()));
-    let final = name, n = 2;
-    while (taken.has(final.toLowerCase())) final = `${name.slice(0, 17)} ${n++}`;
-    this.players.set(conn.connectionId, {
-      conn, name: final, score: 0, streak: 0, choice: null, answerMs: 0, joinedAtQ: this.qIndex,
-    });
-    conn.send({ t: 'welcome', name: final, inGame: this.phase !== 'lobby' });
+    const state = this.connections.get(conn);
+    if (!state) return;
+    if (state.player) { this.syncPlayer(state.player); return; }
+    let p;
+    if (d.session) {
+      p = this.players.get(d.session.id);
+      if (!p || p.token !== d.session.token || (!p.conn && this.now() >= p.expiresAt)) {
+        this.reject(conn, 'La sesión ha caducado o no es válida. Vuelve a entrar para empezar con una nueva puntuación.');
+        return;
+      }
+      clearTimeout(p.expiryTimer);
+      const previous = p.conn;
+      p.conn = conn;
+      if (previous && previous !== conn) previous.close();
+    } else {
+      if (this.players.size >= MAX_PLAYERS) { this.reject(conn, 'La sala ha alcanzado su límite de participantes.'); return; }
+      const name = d.name.trim();
+      const taken = new Set([...this.players.values()].map(item => item.name.toLowerCase()));
+      let final = name, n = 2;
+      while (taken.has(final.toLowerCase())) final = `${name.slice(0, 17)} ${n++}`;
+      p = { id: secret(), token: secret(), conn, name: final, score: 0, streak: 0,
+        choice: null, answerMs: 0, joinedAtQ: this.qIndex, lastPts: 0, lastGotIt: false };
+      this.players.set(p.id, p);
+    }
+    state.player = p;
+    clearTimeout(state.timeout);
+    send(conn, { t: 'welcome', name: p.name, inGame: this.phase !== 'lobby', session: { id: p.id, token: p.token } });
+    this.syncPlayer(p);
     if (this.phase === 'lobby') this.renderPlayerChips();
   }
 
+  questionMessage(p) {
+    const q = this.question();
+    return { t: 'q', i: this.qIndex, n: this.quiz.questions.length, text: q.text,
+      answers: q.answers.map(a => a.text), secs: Math.max(0, (this.deadline - this.now()) / 1000), answered: p.choice !== null };
+  }
+
+  resultMessage(p) {
+    const ranked = this.ranking();
+    return { t: 'reveal', gotIt: p.lastGotIt, answered: p.choice !== null,
+      points: p.lastPts, score: p.score, streak: p.streak, rank: ranked.indexOf(p) + 1, total: ranked.length };
+  }
+
+  syncPlayer(p) {
+    if (this.phase === 'question' && this.now() >= this.deadline) this.endQuestion();
+    if (this.phase === 'lobby') send(p.conn, { t: 'lobby' });
+    else if (this.phase === 'end') send(p.conn, { t: 'end', rank: this.ranking().indexOf(p) + 1, total: this.players.size, score: p.score });
+    else if (p.joinedAtQ === this.qIndex) send(p.conn, { t: 'wait', message: 'La partida está en curso. ¡Te incorporarás en la siguiente pregunta!' });
+    else if (this.phase === 'question') send(p.conn, this.questionMessage(p));
+    else send(p.conn, this.resultMessage(p));
+  }
+
   handleAnswer(conn, d) {
-    const p = this.players.get(conn.connectionId);
-    if (!p || this.phase !== 'question' || d.i !== this.qIndex) return;
+    const p = this.connections.get(conn)?.player;
+    if (!p || p.conn !== conn || this.phase !== 'question' || d.i !== this.qIndex) return;
+    if (this.now() >= this.deadline) { this.endQuestion(); return; }
     if (p.choice !== null || p.joinedAtQ === this.qIndex) return;  // already answered / joined mid-question
-    const choice = Number(d.c);
+    const choice = d.c;
     if (!Number.isInteger(choice) || choice < 0 || choice >= this.question().answers.length) return;
     p.choice = choice;
-    p.answerMs = Date.now() - this.qStartedAt;
+    p.answerMs = this.now() - this.qStartedAt;
+    send(conn, { t: 'ack', i: this.qIndex });
     $('#hq-answered').textContent = this.answeredCount();
     this.checkAllAnswered();
   }
 
   broadcast(msg) {
     for (const p of this.players.values()) {
-      if (p.conn.open) p.conn.send(msg);
+      send(p.conn, msg);
     }
   }
 
@@ -125,10 +238,14 @@ class HostGame {
     $('#h-pin').textContent = this.pin;
     $('#h-quiz-title').textContent = this.quiz.title;
     $('#h-url').textContent = location.host + location.pathname.replace(/index\.html$/, '');
-    const qr = qrcode(0, 'M');
-    qr.addData(joinUrl(this.pin));
-    qr.make();
-    $('#h-qr').innerHTML = qr.createSvgTag({ cellSize: 3, margin: 2 });
+    if (typeof globalThis.qrcode === 'function') {
+      const qr = globalThis.qrcode(0, 'M');
+      qr.addData(joinUrl(this.pin));
+      qr.make();
+      $('#h-qr').innerHTML = qr.createSvgTag({ cellSize: 3, margin: 2 });
+    } else {
+      $('#h-qr').textContent = 'QR no disponible. Utiliza el PIN.';
+    }
     this.renderPlayerChips();
 
     $('#h-start').onclick = () => this.startQuestion(0);
@@ -136,9 +253,9 @@ class HostGame {
       const chip = e.target.closest('.chip');
       if (!chip) return;
       const p = this.players.get(chip.dataset.id);
-      if (p && confirm(`Remove ${p.name}?`)) {
-        p.conn.send({ t: 'kick', reason: 'The host removed you from the game.' });
-        setTimeout(() => p.conn.close(), 200);
+      if (p && confirm(`¿Expulsar a ${p.name}?`)) {
+        if (p.conn) this.reject(p.conn, 'El anfitrión te ha expulsado de la partida.');
+        clearTimeout(p.expiryTimer);
         this.players.delete(chip.dataset.id);
         this.renderPlayerChips();
       }
@@ -147,15 +264,16 @@ class HostGame {
 
   renderPlayerChips() {
     const chips = [...this.players.entries()]
-      .map(([id, p]) => `<span class="chip" data-id="${id}">${esc(p.name)}</span>`).join('');
+      .map(([id, p]) => `<button type="button" class="chip" data-id="${esc(id)}" aria-label="Expulsar a ${esc(p.name)}">${esc(p.name)}${p.conn ? '' : ' (reconectando…)'}</button>`).join('');
     $('#h-players').innerHTML = chips;
     $('#h-count').textContent = this.players.size;
-    $('#h-start').disabled = this.players.size === 0;
+    $('#h-start').disabled = ![...this.players.values()].some(p => p.conn?.open);
   }
 
   /* ---------- question flow ---------- */
 
   startQuestion(i) {
+    clearInterval(this.ticker);
     this.qIndex = i;
     this.phase = 'question';
     const q = this.question();
@@ -167,24 +285,22 @@ class HostGame {
     /* players who joined during the lobby are eligible immediately */
     if (i === 0) for (const p of this.players.values()) p.joinedAtQ = -1;
 
-    this.qStartedAt = Date.now();
-    this.broadcast({
-      t: 'q', i, n: this.quiz.questions.length,
-      text: q.text, answers: q.answers.map(a => a.text), secs: q.time,
-    });
+    this.qStartedAt = this.now();
+    this.deadline = this.qStartedAt + q.time * 1000;
+    for (const p of this.players.values()) send(p.conn, this.questionMessage(p));
 
-    showSub('view-host', 'host-question');
-    $('#hq-progress').textContent = `Question ${i + 1} of ${this.quiz.questions.length}`;
+    $('#hq-progress').textContent = `Pregunta ${i + 1} de ${this.quiz.questions.length}`;
     $('#hq-text').textContent = q.text;
     $('#hq-answered').textContent = '0';
     $('#hq-grid').innerHTML = q.answers.map((a, k) => `
       <div class="answer-tile c${k}"><span class="shape">${SHAPES[k]}</span>${esc(a.text)}</div>`).join('');
     $('#hq-skip').onclick = () => this.endQuestion();
+    showSub('view-host', 'host-question');
 
     const timerEl = $('#hq-timer');
     const endAt = this.qStartedAt + q.time * 1000;
     const tick = () => {
-      const left = Math.max(0, endAt - Date.now());
+      const left = Math.max(0, endAt - this.now());
       timerEl.textContent = Math.ceil(left / 1000);
       timerEl.classList.toggle('low', left < 5100);
       if (left <= 0) this.endQuestion();
@@ -200,38 +316,17 @@ class HostGame {
 
     const q = this.question();
     const correctSet = new Set(q.answers.map((a, k) => a.correct ? k : -1).filter(k => k >= 0));
-    const timeMs = q.time * 1000;
-    const mult = q.points === 'double' ? 2 : q.points === 'none' ? 0 : 1;
-
     for (const p of this.players.values()) {
-      const gotIt = p.choice !== null && correctSet.has(p.choice);
-      let pts = 0;
-      if (gotIt) {
-        p.streak++;
-        const speed = 1 - Math.min(p.answerMs, timeMs) / timeMs / 2;  // Kahoot-style: 500–1000 base
-        pts = Math.round(1000 * speed) * mult;
-        pts += Math.min(p.streak - 1, 5) * 100 * (mult ? 1 : 0);      // streak bonus
-      } else {
-        p.streak = 0;
-      }
-      p.lastPts = pts;
-      p.lastGotIt = gotIt;
-      p.score += pts;
+      if (p.joinedAtQ === this.qIndex) continue;
+      p.lastGotIt = p.choice !== null && correctSet.has(p.choice);
+      const result = scoreAnswer({ correct: p.lastGotIt, elapsedMs: p.answerMs,
+        durationMs: q.time * 1000, mode: q.points, streak: p.streak });
+      p.streak = result.streak;
+      p.lastPts = result.points;
+      p.score += result.points;
     }
-
-    const ranked = this.ranking();
     for (const p of this.players.values()) {
-      if (!p.conn.open) continue;
-      p.conn.send({
-        t: 'reveal',
-        gotIt: p.lastGotIt,
-        answered: p.choice !== null,
-        points: p.lastPts,
-        score: p.score,
-        streak: p.streak,
-        rank: ranked.indexOf(p) + 1,
-        total: ranked.length,
-      });
+      if (p.joinedAtQ !== this.qIndex) send(p.conn, this.resultMessage(p));
     }
 
     /* host reveal screen: histogram + correct answers */
@@ -252,7 +347,7 @@ class HostGame {
     showSub('view-host', 'host-reveal');
 
     const last = this.qIndex === this.quiz.questions.length - 1;
-    $('#hr-next').textContent = last ? 'Podium 🏆' : 'Scoreboard';
+    $('#hr-next').textContent = last ? 'Podio 🏆' : 'Clasificación';
     $('#hr-next').onclick = () => last ? this.showPodium() : this.showScoreboard();
   }
 
@@ -276,7 +371,7 @@ class HostGame {
     this.phase = 'end';
     const ranked = this.ranking();
     for (const p of ranked) {
-      if (p.conn.open) p.conn.send({
+      send(p.conn, {
         t: 'end', rank: ranked.indexOf(p) + 1, total: ranked.length, score: p.score,
       });
     }
@@ -297,13 +392,22 @@ class HostGame {
     $('#hp-again').onclick = () => {
       for (const p of this.players.values()) { p.score = 0; p.streak = 0; }
       this.qIndex = -1;
+      for (const p of this.players.values()) { p.choice = null; p.lastPts = 0; p.lastGotIt = false; p.joinedAtQ = -1; }
       this.renderLobby();
+      this.broadcast({ t: 'lobby' });
     };
   }
 
   destroy() {
     this.destroyed = true;
     clearInterval(this.ticker);
+    clearTimeout(this.retryTimer);
+    clearTimeout(this.openTimer);
+    window.removeEventListener('beforeunload', this.beforeUnload);
+    for (const p of this.players.values()) clearTimeout(p.expiryTimer);
+    for (const state of this.connections.values()) clearTimeout(state.timeout);
     if (this.peer) this.peer.destroy();
+    this.connections.clear();
+    this.players.clear();
   }
 }

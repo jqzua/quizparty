@@ -1,12 +1,16 @@
+import { $, SHAPES, esc, showView } from './util.js';
+import { getQuiz, upsertQuiz, blankQuestion, exportQuiz } from './store.js';
+import { MAX_QUESTIONS } from './config.js';
 'use strict';
 
 /* Quiz editor. Edits `edQuiz` in place and auto-saves to localStorage on every change. */
 let edQuiz = null;
 let edIndex = 0;
 
-function renderEditor(quizId) {
+export function renderEditor(quizId) {
   edQuiz = getQuiz(quizId);
   if (!edQuiz) { location.hash = 'library'; return; }
+  edQuiz.questions.forEach(q => { while (q.answers.length < 2) q.answers.push({ text: '', correct: false }); });
   edIndex = 0;
   showView('view-editor');
   $('#ed-title').value = edQuiz.title;
@@ -19,30 +23,34 @@ function edSave() {
 }
 
 function edRenderTabs() {
+  const restoreFocus = document.activeElement?.matches('.q-tab');
+  $('#ed-addq').disabled = edQuiz.questions.length >= MAX_QUESTIONS;
+  $('#ed-qdup').disabled = edQuiz.questions.length >= MAX_QUESTIONS;
   $('#ed-qlist').innerHTML = edQuiz.questions.map((q, i) => `
-    <button class="q-tab ${i === edIndex ? 'sel' : ''}" data-i="${i}">
-      <small>${i + 1}</small>${esc(q.text.trim() || 'Untitled question')}
+    <button class="q-tab ${i === edIndex ? 'sel' : ''}" data-i="${i}" aria-pressed="${i === edIndex}">
+      <small>${i + 1}</small>${esc(q.text.trim() || 'Pregunta sin título')}
     </button>`).join('');
+  if (restoreFocus) $(`#ed-qlist [data-i="${edIndex}"]`)?.focus();
 }
 
 function edRenderQuestion() {
   const q = edQuiz.questions[edIndex];
   if (!q) return;
-  $('#ed-qlabel').textContent = `Question ${edIndex + 1} of ${edQuiz.questions.length}`;
+  $('#ed-qlabel').textContent = `Pregunta ${edIndex + 1} de ${edQuiz.questions.length}`;
   $('#ed-qtext').value = q.text;
   $('#ed-qtime').value = String(q.time);
   $('#ed-qpoints').value = q.points;
   $('#ed-answers').innerHTML = q.answers.map((a, i) => `
     <div class="ans-row" data-i="${i}">
       <div class="ans-swatch c${i}">${SHAPES[i]}</div>
-      <input type="text" maxlength="100" placeholder="Answer ${i + 1}${i >= 2 ? ' (optional)' : ''}" value="${esc(a.text)}">
-      <input type="checkbox" title="Correct answer" ${a.correct ? 'checked' : ''}>
-      ${q.answers.length > 2 ? '<button class="btn sm" data-act="rm" title="Remove">✕</button>' : ''}
+      <input aria-label="Respuesta ${i + 1}" type="text" maxlength="100" placeholder="Respuesta ${i + 1}${i >= 2 ? ' (opcional)' : ''}" value="${esc(a.text)}">
+      <input aria-label="Marcar la respuesta ${i + 1} como correcta" type="checkbox" title="Respuesta correcta" ${a.correct ? 'checked' : ''}>
+      ${q.answers.length > 2 ? '<button class="btn sm" data-act="rm" aria-label="Eliminar respuesta" title="Eliminar">✕</button>' : ''}
     </div>`).join('');
   $('#ed-adda').style.display = q.answers.length < 4 ? '' : 'none';
 }
 
-function initEditorEvents() {
+export function initEditorEvents() {
   $('#ed-title').addEventListener('input', e => {
     if (!edQuiz) return;
     edQuiz.title = e.target.value;
@@ -58,6 +66,7 @@ function initEditorEvents() {
   });
 
   $('#ed-addq').addEventListener('click', () => {
+    if (edQuiz.questions.length >= MAX_QUESTIONS) return;
     edQuiz.questions.push(blankQuestion());
     edIndex = edQuiz.questions.length - 1;
     edSave(); edRenderTabs(); edRenderQuestion();
@@ -90,6 +99,7 @@ function initEditorEvents() {
     const row = btn.closest('.ans-row');
     edQuiz.questions[edIndex].answers.splice(+row.dataset.i, 1);
     edSave(); edRenderQuestion();
+    $('#ed-answers input[type=text]')?.focus();
   });
   $('#ed-adda').addEventListener('click', () => {
     const q = edQuiz.questions[edIndex];
@@ -100,6 +110,7 @@ function initEditorEvents() {
   $('#ed-qup').addEventListener('click', () => edMoveQuestion(-1));
   $('#ed-qdown').addEventListener('click', () => edMoveQuestion(1));
   $('#ed-qdup').addEventListener('click', () => {
+    if (edQuiz.questions.length >= MAX_QUESTIONS) return;
     const copy = JSON.parse(JSON.stringify(edQuiz.questions[edIndex]));
     edQuiz.questions.splice(edIndex + 1, 0, copy);
     edIndex++;

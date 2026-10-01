@@ -1,0 +1,17 @@
+{
+  "name": "quizparty",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "eslint js && node scripts/check.js",
+    "test": "node --test --test-isolation=none tests/*.test.js",
+    "test:browser": "node tests/browser.cjs"
+  },
+  "devDependencies": {
+    "eslint": "10.11.0",
+    "playwright": "1.58.2"
+  },
+  "engines": {
+    "node": ">=22.15"
+  }
+}
