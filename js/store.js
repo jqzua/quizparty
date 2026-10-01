@@ -112,7 +112,7 @@ function exportQuiz(quiz) {
   delete clean.id;
   const filename = (quiz.title.trim() || 'cuestionario').normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '').replace(/[^\w\- ]+/g, '').replace(/ +/g, '-').toLowerCase() || 'cuestionario';
-  download(JSON.stringify(clean, null, 2), filename + '.quizparty.json');
+  download(JSON.stringify(clean, null, 2), filename + '.quizlab.json');
 }
 
 export { sampleQuiz, getQuizzes, saveQuizzes, getQuiz, upsertQuiz, deleteQuiz, blankQuestion, newQuiz, validateQuiz, normalizeQuiz, importQuizJson, importFile, exportQuiz };

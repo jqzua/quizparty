@@ -1,4 +1,4 @@
-# 🎉 QuizParty
+# 🎉 QuizLab
 
 Cuestionarios en directo, gratuitos y de código abierto. El anfitrión muestra la partida en una pantalla y los participantes entran desde el móvil mediante PIN o QR.
 
@@ -88,4 +88,4 @@ Consulta el [estado de las mejoras](docs/MEJORAS_TECNICAS.md) y la [revisión in
 
 ## Licencia
 
-[MIT](LICENSE). QuizParty no está afiliado a Kahoot.
+[MIT](LICENSE). QuizLab no está afiliado a Kahoot.
