@@ -15,12 +15,14 @@ export function uid() {
 }
 
 export function showView(id) {
+  pauseMedia();
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === id));
   window.scrollTo(0, 0);
   focusView(id);
 }
 
 export function showSub(root, id) {
+  pauseMedia();
   document.querySelectorAll(`#${root} > div`).forEach(v => v.classList.toggle('active', v.id === id));
   window.scrollTo(0, 0);
   focusView(id);
@@ -40,9 +42,11 @@ function focusView(id) {
   if (!target.matches('input, button')) target.setAttribute('tabindex', '-1');
   target.focus({ preventScroll: true });
 }
-export function download(text, filename) {
-  const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+export function download(text, filename, type = 'application/json') {
+  const url = URL.createObjectURL(new Blob([text], { type }));
   const link = document.createElement('a');
   link.href = url; link.download = filename; link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
+
+function pauseMedia() { document.querySelectorAll('audio, video').forEach(media => media.pause()); }

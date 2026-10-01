@@ -12,7 +12,7 @@ export function cleanupRoute() {
 export function parseRoute(hash) {
   let value;
   try { value = decodeURIComponent(hash.replace(/^#/, '')); } catch { return { view: 'home' }; }
-  if (value === 'library') return { view: 'library' };
+  if (['library', 'reports'].includes(value)) return { view: value };
   const match = /^(editor|host)\/([a-zA-Z0-9-]{1,100})$/.exec(value);
   if (match) return { view: match[1], id: match[2] };
   const join = /^join(?:\/(\d{6}))?$/.exec(value);

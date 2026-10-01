@@ -1,3 +1,5 @@
+import { questionType } from './questions.js';
+import { quizMediaBytes, MAX_QUIZ_MEDIA } from './media.js';
 import { uid, download } from './util.js';
 import { createLibrary } from './storage.js';
 import { validateQuizShape, parseLibrary } from './schema.js';
@@ -49,7 +51,7 @@ function deleteQuiz(id) {
 
 function blankQuestion() {
   return {
-    text: '',
+    text: '', type: 'single', explanation: '', accepted: [], media: null,
     answers: [
       { text: '', correct: false }, { text: '', correct: false },
       { text: '', correct: false }, { text: '', correct: false },
@@ -71,10 +73,20 @@ function validateQuiz(quiz) {
   quiz.questions.forEach((q, i) => {
     const n = i + 1;
     if (!q.text.trim()) problems.push(`• La pregunta ${n} no tiene enunciado.`);
+    const type = questionType(q);
     const filled = q.answers.filter(a => a.text.trim());
-    if (filled.length < 2) problems.push(`• La pregunta ${n} necesita al menos 2 respuestas.`);
-    if (!q.answers.some(a => a.correct && a.text.trim())) problems.push(`• La pregunta ${n} no tiene ninguna respuesta correcta marcada.`);
+    if (type === 'written') {
+      if (!q.accepted?.some(a => a.trim())) problems.push(`• La pregunta ${n} necesita al menos una respuesta escrita aceptada.`);
+    } else {
+      if (filled.length < 2) problems.push(`• La pregunta ${n} necesita al menos 2 respuestas con texto accesible.`);
+      if (['single', 'multi', 'boolean'].includes(type) && !filled.some(a => a.correct)) problems.push(`• La pregunta ${n} no tiene ninguna respuesta correcta marcada.`);
+      if (type === 'boolean' && (q.answers.length !== 2 || q.answers.filter(a => a.correct).length !== 1)) problems.push(`• La pregunta ${n} debe tener exactamente una respuesta verdadera/falsa correcta.`);
+    }
+    for (const media of [q.media, ...q.answers.map(a => a.media)]) {
+      if (media && !media.alt.trim()) problems.push(`• Añade una alternativa textual al contenido multimedia de la pregunta ${n}.`);
+    }
   });
+  if (quizMediaBytes(quiz) > MAX_QUIZ_MEDIA) problems.push('• El contenido multimedia del cuestionario supera 4 MB.');
   return problems;
 }
 
@@ -83,20 +95,21 @@ function normalizeQuiz(quiz) {
   return {
     ...quiz,
     questions: quiz.questions.map(q => ({
-      ...q,
-      answers: q.answers.filter(a => a.text.trim()),
+      ...q, type: questionType(q), explanation: q.explanation || '', accepted: q.accepted || [],
+      answers: questionType(q) === 'written' ? [] : q.answers.filter(a => a.text.trim()),
     })),
   };
 }
 
 function importQuizJson(text) {
-  if (new TextEncoder().encode(text).length > MAX_FILE_BYTES) throw new Error('El archivo supera el límite de 2 MB.');
+  if (new TextEncoder().encode(text).length > MAX_FILE_BYTES) throw new Error('El archivo supera el límite de 8 MB.');
   let data;
   try { data = JSON.parse(text); } catch { throw new Error('El archivo no contiene JSON válido.'); }
   if (!validateQuizShape(data)) throw new Error('Cuestionario no válido: revisa preguntas, respuestas, tiempos y puntos.');
   return { id: uid(), title: data.title, questions: data.questions.map(q => ({
-    text: q.text, time: q.time, points: q.points,
-    answers: q.answers.map(a => ({ text: a.text, correct: a.correct })),
+    text: q.text, time: q.time, points: q.points, type: questionType(q),
+    explanation: q.explanation || '', accepted: q.accepted || [], media: q.media || null,
+    answers: q.answers.map(a => ({ text: a.text, correct: a.correct, ...(a.media ? { media: a.media } : {}) })),
   })) };
 }
 function importFile(text) {

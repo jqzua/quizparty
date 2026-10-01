@@ -33,7 +33,7 @@ export function createLibrary({ storage, seed, notify = () => {} }) {
         report('Otra pestaña ha cambiado la biblioteca. Descarga tus cambios y recarga para recuperar la versión guardada.');
         return false;
       }
-      const next = JSON.stringify({ version: 2, quizzes: cache });
+      const next = JSON.stringify({ version: 3, quizzes: cache });
       storage().setItem(LS_KEY, next);
       raw = next; dirty = false; report(''); return true;
     } catch {
@@ -41,5 +41,5 @@ export function createLibrary({ storage, seed, notify = () => {} }) {
       return false;
     }
   }
-  return { get, save, original: () => raw, backup: () => JSON.stringify({ version: 2, quizzes: get() }, null, 2), isDirty: () => dirty };
+  return { get, save, original: () => raw, backup: () => JSON.stringify({ version: 3, quizzes: get() }, null, 2), isDirty: () => dirty };
 }

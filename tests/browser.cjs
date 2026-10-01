@@ -17,7 +17,7 @@ fs.mkdirSync(path.join(root, 'test-results'), { recursive: true });
       const url = new URL(route.request().url());
       if (url.origin !== origin) return route.fulfill({ body: url.pathname.includes('peerjs') ? fs.readFileSync(path.join(__dirname, 'fake-peer.js'), 'utf8') : '', contentType: 'text/javascript' });
       const file = path.join(root, url.pathname === '/' ? 'index.html' : url.pathname);
-      return route.fulfill({ body: fs.readFileSync(file), contentType: file.endsWith('.html') ? 'text/html' : file.endsWith('.css') ? 'text/css' : 'text/javascript' });
+      return route.fulfill({ body: fs.readFileSync(file), contentType: file.endsWith('.html') ? 'text/html' : file.endsWith('.css') ? 'text/css' : file.endsWith('.png') ? 'image/png' : 'text/javascript' });
     });
     async function page(url = '/') {
       const tab = await context.newPage(); tab.on('pageerror', e => errors.push(e.message));

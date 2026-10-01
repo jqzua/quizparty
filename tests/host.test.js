@@ -106,3 +106,66 @@ test('simulated group completes a question; capacity guard rejects overflow', t 
   assert.equal(game.phase, 'reveal');
   assert.ok(conns.every(c => c.messages.at(-1).score === 975));
 });
+
+test('typed answers are graded by the host and solutions are withheld until reveal', t => {
+  const { game, join, advance } = setup(t);
+  game.quiz.questions = [
+    { text: 'Selecciona', type: 'multi', time: 20, points: 'standard', explanation: 'A y C.', answers: [{ text: 'A', correct: true }, { text: 'B', correct: false }, { text: 'C', correct: true }] },
+    { text: 'Ordena', type: 'order', time: 20, points: 'standard', answers: [{ text: 'Uno', correct: false }, { text: 'Dos', correct: false }, { text: 'Tres', correct: false }] },
+    { text: 'Escribe', type: 'written', time: 20, points: 'standard', accepted: ['París'], answers: [] },
+    { text: 'Opinión', type: 'poll', time: 20, points: 'double', answers: [{ text: 'Sí', correct: true }, { text: 'No', correct: false }] },
+  ];
+  const a = join('Ana'), b = join('Luis');
+  game.startQuestion(0);
+  const publicQuestion = a.messages.at(-1);
+  assert.equal(publicQuestion.type, 'multi'); assert.equal(publicQuestion.solution, undefined); assert.equal(publicQuestion.explanation, undefined);
+  advance(1000); a.emit('data', { t: 'a', i: 0, c: [0, 2] }); b.emit('data', { t: 'a', i: 0, c: [0] });
+  assert.equal(a.messages.at(-1).gotIt, true); assert.equal(b.messages.at(-1).points, 0);
+  assert.equal(a.messages.at(-1).explanation, 'A y C.');
+  game.startQuestion(1);
+  const order = a.messages.at(-1).answers;
+  a.emit('data', { t: 'a', i: 1, c: ['Uno', 'Dos', 'Tres'].map(text => order.indexOf(text)) });
+  game.endQuestion(); assert.equal(a.messages.at(-1).gotIt, true);
+  game.startQuestion(2); a.emit('data', { t: 'a', i: 2, c: '  PARÍS ' }); game.endQuestion();
+  assert.equal(a.messages.at(-1).gotIt, true);
+  const p = [...game.players.values()][0], previousScore = p.score, previousStreak = p.streak;
+  game.startQuestion(3); a.emit('data', { t: 'a', i: 3, c: 1 }); game.endQuestion();
+  assert.equal(a.messages.at(-1).survey, true); assert.equal(p.score, previousScore); assert.equal(p.streak, previousStreak);
+  assert.equal(game.report.questions.length, 4); assert.equal(game.report.questions[3].rows[0].correct, null);
+});
+
+test('room lock blocks new entries but permits authenticated resume, and capacity is enforced', t => {
+  const { game, join, session } = setup(t);
+  const a = join('Ana'), credentials = session(a); a.close();
+  game.locked = true;
+  const blocked = join('Luis'); assert.equal(blocked.messages.at(-1).t, 'kick');
+  const resumed = join('Ana', credentials); assert.equal(resumed.messages.at(-1).t, 'lobby');
+  game.locked = false; game.capacity = 1;
+  assert.equal(join('Luis').messages.at(-1).t, 'kick');
+  assert.equal(game.players.size, 1);
+});
+
+test('approval does not allocate a player until admitted and can be rejected during a question', t => {
+  const { game, join } = setup(t);
+  join('Ana'); game.startQuestion(0); game.approval = true;
+  const waiting = join('Luis');
+  assert.equal(waiting.messages.at(-1).t, 'approval'); assert.equal(game.players.size, 1);
+  const request = game.pending.get(waiting); game.handleJoin(waiting, request.data, true);
+  assert.equal(game.players.size, 2); assert.equal(waiting.messages.at(-1).t, 'wait');
+  const refused = join('Eva'); game.reject(refused, 'Solicitud rechazada.');
+  assert.equal(refused.messages.at(-1).t, 'kick'); t.mock.timers.tick(200);
+  assert.equal(game.pending.size, 0);
+});
+
+test('moderation during a question revokes the session and retains report evidence', t => {
+  const { game, join, session, advance } = setup(t);
+  globalThis.confirm = () => true;
+  const a = join('Ana'), b = join('Luis'), credentials = session(b);
+  game.startQuestion(0); advance(1000); b.emit('data', { t: 'a', i: 0, c: 0 });
+  game.kickPlayer(credentials.id);
+  assert.equal(b.messages.at(-1).t, 'kick');
+  assert.equal(join('Luis', credentials).messages.at(-1).t, 'kick');
+  a.emit('data', { t: 'a', i: 0, c: 0 });
+  assert.equal(game.report.questions[0].rows.length, 2);
+  assert.equal(game.report.questions[0].rows.find(row => row.name === 'Luis').answered, true);
+});

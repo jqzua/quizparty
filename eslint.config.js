@@ -1,6 +1,6 @@
 const browserGlobals = Object.fromEntries([
   'window', 'document', 'location', 'history', 'localStorage', 'sessionStorage',
-  'alert', 'confirm', 'crypto', 'performance', 'setTimeout', 'clearTimeout', 'setInterval',
+  'FileReader', 'alert', 'confirm', 'crypto', 'performance', 'setTimeout', 'clearTimeout', 'setInterval',
   'clearInterval', 'Blob', 'URL', 'TextEncoder', 'CustomEvent', 'structuredClone',
 ].map(name => [name, 'readonly']));
 export default [{

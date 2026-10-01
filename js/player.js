@@ -1,3 +1,4 @@
+import { mediaHTML } from './media.js';
 import { $, SHAPES, esc, showSub, ordinal } from './util.js';
 import { setCleanup } from './navigation.js';
 import { NETWORK, PEER_PREFIX, GRACE_MS, CONNECT_TIMEOUT_MS } from './config.js';
@@ -8,6 +9,7 @@ const DROPPED = 'El anfitrión ha terminado la partida o se ha perdido la conexi
 const player = {
   peer: null, conn: null, name: '', pin: '', qIndex: 0, ticker: null, gameOver: false,
   active: false, generation: 0, retry: null, handshake: null, heartbeat: null,
+  question: null, selection: [], order: [], written: '', expired: false,
   session: null, reconnectUntil: 0, pending: null, ping: null, sequence: 0,
 };
 function savedSession(pin) {
@@ -115,7 +117,7 @@ function connect() {
     });
     conn.on('data', d => {
       if (!current() || !validHostMessage(d)) return;
-      if (d.t === 'welcome') {
+      if (d.t === 'welcome' || d.t === 'approval') {
         clearTimeout(player.handshake);
         player.reconnectUntil = 0;
         clearInterval(player.heartbeat);
@@ -143,10 +145,10 @@ function connect() {
 }
 function resetLobby() {
   clearInterval(player.ticker);
-  player.gameOver = false; player.pending = null; player.qIndex = -1;
+  player.gameOver = false; player.pending = null; player.qIndex = -1; player.question = null; player.selection = []; player.order = []; player.written = '';
   $('#play-wait .muted').textContent = WAIT;
   $('#pd-msg').textContent = DROPPED;
-  for (const id of ['pr-points', 'pr-streak', 'pr-rank', 'pe-score']) $('#' + id).textContent = '';
+  for (const id of ['pr-points', 'pr-streak', 'pr-rank', 'pe-score', 'pr-solution', 'pr-explanation']) $('#' + id).textContent = '';
   showSub('view-play', 'play-wait');
 }
 export function playerOnMessage(d) {
@@ -161,6 +163,9 @@ export function playerOnMessage(d) {
       showSub('view-play', 'play-wait');
       break;
     case 'lobby': resetLobby(); break;
+    case 'approval':
+      $('#pw-name').textContent = player.name;
+      // fall through: both states wait for the host
     case 'wait':
       clearInterval(player.ticker);
       $('#play-wait .muted').textContent = d.message;
@@ -178,22 +183,31 @@ export function playerOnMessage(d) {
       break;
     case 'q': {
       player.gameOver = false;
-      if (player.qIndex !== d.i) player.pending = null;
-      player.qIndex = d.i;
+      if (player.qIndex !== d.i || !player.question) { player.pending = null; player.selection = []; player.order = d.answers.map((_, i) => i); player.written = ''; }
+      player.qIndex = d.i; player.question = d; player.expired = false;
       $('#pq-progress').textContent = `${d.i + 1} / ${d.n}`;
       $('#pq-text').textContent = d.text;
-      $('#pq-grid').innerHTML = d.answers.map((a, k) => `
-        <button class="answer-tile c${k}" data-c="${k}">
+      $('#pq-media').innerHTML = mediaHTML(d.media);
+      $('#pq-instructions').textContent = { single: 'Elige una respuesta.', multi: 'Selecciona todas las opciones correctas y pulsa Enviar.', boolean: 'Elige verdadero o falso.', order: 'Ordena los elementos con las flechas y pulsa Enviar.', written: 'Escribe tu respuesta y pulsa Enviar.', poll: 'Elige una opción. Esta encuesta no da puntos.' }[d.type];
+      $('#pq-grid').hidden = ['order', 'written'].includes(d.type);
+      $('#pq-written').hidden = d.type !== 'written';
+      $('#pq-order').hidden = d.type !== 'order';
+      $('#pq-submit').hidden = !['multi', 'written', 'order'].includes(d.type);
+      $('#pq-input').value = player.written; $('#pq-input').disabled = false;
+      $('#pq-grid').innerHTML = ['order', 'written'].includes(d.type) ? '' : d.answers.map((a, k) => `
+        <div class="answer-option"><button class="answer-tile c${k}" data-c="${k}" ${d.type === 'multi' ? `aria-pressed="${player.selection.includes(k)}"` : ''}>
           <span class="shape" aria-hidden="true">${SHAPES[k]}</span><span class="atext">${esc(a)}</span>
-        </button>`).join('');
+        </button>${mediaHTML(d.answerMedia[k])}</div>`).join('');
+      if (d.type === 'order') renderOrder();
+      updateSubmit();
       const endAt = performance.now() + d.secs * 1000;
       clearInterval(player.ticker);
       const tick = () => {
         const left = Math.max(0, Math.ceil((endAt - performance.now()) / 1000));
         $('#pq-timer').textContent = `${left} s`;
         if (left <= 0) {
-          clearInterval(player.ticker);
-          $('#pq-grid').querySelectorAll('button').forEach(button => { button.disabled = true; });
+          player.expired = true; clearInterval(player.ticker);
+          $('#play-question').querySelectorAll('button, input').forEach(control => { control.disabled = true; });
         }
       };
       player.ticker = setInterval(tick, 250); tick();
@@ -205,9 +219,11 @@ export function playerOnMessage(d) {
     case 'reveal': {
       clearInterval(player.ticker); player.pending = null;
       const box = $('#play-result');
-      box.classList.remove('good', 'bad'); box.classList.add(d.gotIt ? 'good' : 'bad');
-      $('#pr-verdict').textContent = d.gotIt ? '¡Correcto! ✔' : (d.answered ? 'Incorrecto ✘' : 'Se ha agotado el tiempo ⌛');
-      $('#pr-points').textContent = '+' + d.points;
+      box.classList.remove('good', 'bad', 'survey'); box.classList.add(d.survey ? 'survey' : d.gotIt ? 'good' : 'bad');
+      $('#pr-verdict').textContent = d.survey ? (d.answered ? 'Opinión registrada' : 'Encuesta cerrada') : d.gotIt ? '¡Correcto! ✔' : (d.answered ? 'Incorrecto ✘' : 'Se ha agotado el tiempo ⌛');
+      $('#pr-points').textContent = d.survey ? 'Sin puntos' : '+' + d.points;
+      $('#pr-solution').textContent = d.solution;
+      $('#pr-explanation').textContent = d.explanation;
       $('#pr-streak').textContent = d.streak >= 2 ? `🔥 Racha de aciertos: ${d.streak}` : '';
       $('#pr-rank').textContent = `Vas en el puesto ${ordinal(d.rank)} de ${d.total}`;
       showSub('view-play', 'play-result');
@@ -233,10 +249,43 @@ export function initPlayerEvents() {
   $('#p-retry').addEventListener('click', () => playerShowJoinForm(player.pin));
   $('#pq-grid').addEventListener('click', e => {
     const btn = e.target.closest('button[data-c]');
-    if (!btn || btn.disabled || player.pending || !player.conn?.open) return;
-    const message = { t: 'a', i: player.qIndex, c: +btn.dataset.c };
-    player.pending = message;
-    if (send(player.conn, message)) showSub('view-play', 'play-answered');
-    else { player.pending = null; player.conn.close(); }
+    if (!btn || btn.disabled || player.pending || player.expired || !player.conn?.open) return;
+    const choice = +btn.dataset.c;
+    if (player.question.type === 'multi') {
+      player.selection = player.selection.includes(choice) ? player.selection.filter(i => i !== choice) : [...player.selection, choice];
+      btn.setAttribute('aria-pressed', String(player.selection.includes(choice))); updateSubmit();
+    } else submit(choice);
   });
+  $('#pq-input').addEventListener('input', e => { player.written = e.target.value; updateSubmit(); });
+  $('#pq-input').addEventListener('keydown', e => { if (e.key === 'Enter' && !$('#pq-submit').disabled) submit(player.written); });
+  $('#pq-order').addEventListener('click', e => {
+    const btn = e.target.closest('[data-move]'); if (!btn || btn.disabled || player.expired) return;
+    const index = +btn.dataset.index, to = index + +btn.dataset.move;
+    if (to < 0 || to >= player.order.length) return;
+    [player.order[index], player.order[to]] = [player.order[to], player.order[index]];
+    renderOrder();
+    const row = $('#pq-order').children[to];
+    row.querySelector('button:not(:disabled)')?.focus();
+  });
+  $('#pq-submit').addEventListener('click', () => {
+    if ($('#pq-submit').disabled) return;
+    submit(player.question.type === 'multi' ? player.selection : player.question.type === 'order' ? player.order : player.written);
+  });
+}
+function renderOrder() {
+  const q = player.question;
+  $('#pq-order').innerHTML = player.order.map((value, index) => `<li><span class="order-text">${index + 1}. ${esc(q.answers[value])}</span>
+    <button class="btn" data-index="${index}" data-move="-1" aria-label="Subir ${esc(q.answers[value])}" ${index === 0 ? 'disabled' : ''}>↑</button>
+    <button class="btn" data-index="${index}" data-move="1" aria-label="Bajar ${esc(q.answers[value])}" ${index === player.order.length - 1 ? 'disabled' : ''}>↓</button>${mediaHTML(q.answerMedia[value])}</li>`).join('');
+}
+function updateSubmit() {
+  const type = player.question?.type;
+  $('#pq-submit').disabled = player.expired || (type === 'multi' && !player.selection.length) || (type === 'written' && !player.written.trim());
+}
+function submit(choice) {
+  if (player.pending || player.expired || !player.conn?.open) return;
+  const message = { t: 'a', i: player.qIndex, c: choice };
+  player.pending = message;
+  if (send(player.conn, message)) showSub('view-play', 'play-answered');
+  else { player.pending = null; player.conn.close(); }
 }

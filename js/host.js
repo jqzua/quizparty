@@ -1,3 +1,6 @@
+import { questionType, validResponse, isCorrect, solutionText, shuffledIndices, QUESTION_TYPES } from './questions.js';
+import { mediaHTML } from './media.js';
+import { newReport, recordQuestion, saveReport, reportHTML, exportReport } from './reports.js';
 import { $, esc, SHAPES, showView, showSub, joinUrl } from './util.js';
 import { getQuiz, validateQuiz, normalizeQuiz } from './store.js';
 import { setCleanup, setLeaveGuard } from './navigation.js';
@@ -23,19 +26,26 @@ export function startHost(quizId) {
   showView('view-host');
   hostGame = new HostGame(normalizeQuiz(stored));
   hostGame.openRoom();
-  setLeaveGuard(() => !hostGame || hostGame.destroyed || hostGame.phase === 'end' || confirm('¿Salir de la sala? La partida terminará para todos.'));
+  setLeaveGuard(() => !hostGame || hostGame.destroyed || (hostGame.phase === 'end' && !hostGame.reportUnsaved) || confirm('¿Salir de la sala? La partida terminará para todos.'));
   setCleanup(() => { if (hostGame) { hostGame.destroy(); hostGame = null; } });
 }
 
 export class HostGame {
   constructor(quiz, { now = () => performance.now(), createPeer = (id, options) => new globalThis.Peer(id, options) } = {}) {
     this.quiz = quiz;
+    this.report = newReport(quiz);
+    this.reportUnsaved = false;
+    this.questionPlayers = [];
+    this.pending = new Map();
+    this.locked = false;
+    this.approval = false;
+    this.capacity = MAX_PLAYERS;
     this.now = now;
     this.createPeer = createPeer;
     this.connections = new Map();
     this.opened = false;
     this.retryTimer = null;
-    this.beforeUnload = e => { if (!this.destroyed && this.phase !== 'end') { e.preventDefault(); e.returnValue = ''; } };
+    this.beforeUnload = e => { if (!this.destroyed && (this.phase !== 'end' || this.reportUnsaved)) { e.preventDefault(); e.returnValue = ''; } };
     window.addEventListener('beforeunload', this.beforeUnload);
     this.players = new Map();   // session id -> retained player state
     this.qIndex = -1;
@@ -44,6 +54,7 @@ export class HostGame {
     this.ticker = null;
     this.idTries = 0;
     this.destroyed = false;
+    this.initControls();
   }
 
   /* ---------- room / connections ---------- */
@@ -117,6 +128,8 @@ export class HostGame {
     const closed = () => {
       clearTimeout(state.timeout);
       this.connections.delete(conn);
+      this.pending.delete(conn);
+      this.renderControls();
       const p = state.player;
       if (!p || p.conn !== conn || this.players.get(p.id) !== p || this.destroyed) return;
       p.conn = null;
@@ -133,6 +146,7 @@ export class HostGame {
     if (p.conn || this.players.get(p.id) !== p) return;
     this.players.delete(p.id);
     if (this.phase === 'lobby') this.renderPlayerChips();
+    this.renderControls();
     if (this.phase === 'question') this.checkAllAnswered();
   }
 
@@ -149,10 +163,24 @@ export class HostGame {
     if (state) { state.rejected = true; clearTimeout(state.timeout); state.timeout = setTimeout(() => conn.close(), 200); }
   }
 
-  handleJoin(conn, d) {
+  handleJoin(conn, d, approved = false) {
     const state = this.connections.get(conn);
     if (!state) return;
     if (state.player) { this.syncPlayer(state.player); return; }
+    if (!d.session) {
+      if (this.locked) { this.reject(conn, 'La sala está bloqueada para nuevas entradas.'); return; }
+      if (this.players.size >= this.capacity) { this.reject(conn, 'La sala ha alcanzado su aforo.'); return; }
+      if (this.approval && !approved) {
+        if (this.pending.has(conn)) return;
+        const request = { id: secret(), name: d.name.trim(), data: d };
+        this.pending.set(conn, request);
+        clearTimeout(state.timeout);
+        state.timeout = setTimeout(() => { this.pending.delete(conn); this.reject(conn, 'La solicitud de entrada ha caducado.'); this.renderControls(); }, 120000);
+        send(conn, { t: 'approval', message: 'Esperando a que el anfitrión apruebe tu entrada…' });
+        this.renderControls(); return;
+      }
+    }
+
     let p;
     if (d.session) {
       p = this.players.get(d.session.id);
@@ -165,7 +193,7 @@ export class HostGame {
       p.conn = conn;
       if (previous && previous !== conn) previous.close();
     } else {
-      if (this.players.size >= MAX_PLAYERS) { this.reject(conn, 'La sala ha alcanzado su límite de participantes.'); return; }
+      if (this.players.size >= this.capacity) { this.reject(conn, 'La sala ha alcanzado su límite de participantes.'); return; }
       const name = d.name.trim();
       const taken = new Set([...this.players.values()].map(item => item.name.toLowerCase()));
       let final = name, n = 2;
@@ -174,23 +202,28 @@ export class HostGame {
         choice: null, answerMs: 0, joinedAtQ: this.qIndex, lastPts: 0, lastGotIt: false };
       this.players.set(p.id, p);
     }
+    this.pending.delete(conn);
     state.player = p;
     clearTimeout(state.timeout);
     send(conn, { t: 'welcome', name: p.name, inGame: this.phase !== 'lobby', session: { id: p.id, token: p.token } });
     this.syncPlayer(p);
+    this.renderControls();
     if (this.phase === 'lobby') this.renderPlayerChips();
   }
 
   questionMessage(p) {
     const q = this.question();
-    return { t: 'q', i: this.qIndex, n: this.quiz.questions.length, text: q.text,
-      answers: q.answers.map(a => a.text), secs: Math.max(0, (this.deadline - this.now()) / 1000), answered: p.choice !== null };
+    return { t: 'q', i: this.qIndex, n: this.quiz.questions.length, text: q.text, type: questionType(q),
+      answers: this.answerOrder.map(i => q.answers[i].text), media: q.media || null,
+      answerMedia: this.answerOrder.map(i => q.answers[i].media || null),
+      secs: Math.max(0, (this.deadline - this.now()) / 1000), answered: p.choice !== null };
   }
 
   resultMessage(p) {
     const ranked = this.ranking();
     return { t: 'reveal', gotIt: p.lastGotIt, answered: p.choice !== null,
-      points: p.lastPts, score: p.score, streak: p.streak, rank: ranked.indexOf(p) + 1, total: ranked.length };
+      points: p.lastPts, score: p.score, streak: p.streak, rank: ranked.indexOf(p) + 1, total: ranked.length,
+      survey: questionType(this.question()) === 'poll', explanation: this.question().explanation || '', solution: solutionText(this.question()) };
   }
 
   syncPlayer(p) {
@@ -207,9 +240,9 @@ export class HostGame {
     if (!p || p.conn !== conn || this.phase !== 'question' || d.i !== this.qIndex) return;
     if (this.now() >= this.deadline) { this.endQuestion(); return; }
     if (p.choice !== null || p.joinedAtQ === this.qIndex) return;  // already answered / joined mid-question
-    const choice = d.c;
-    if (!Number.isInteger(choice) || choice < 0 || choice >= this.question().answers.length) return;
-    p.choice = choice;
+    const q = this.question();
+    if (!validResponse(q, d.c)) return;
+    p.choice = questionType(q) === 'written' ? d.c.trim() : Array.isArray(d.c) ? d.c.map(i => this.answerOrder[i]) : this.answerOrder[d.c];
     p.answerMs = this.now() - this.qStartedAt;
     send(conn, { t: 'ack', i: this.qIndex });
     $('#hq-answered').textContent = this.answeredCount();
@@ -251,15 +284,73 @@ export class HostGame {
     $('#h-start').onclick = () => this.startQuestion(0);
     $('#h-players').onclick = e => {
       const chip = e.target.closest('.chip');
-      if (!chip) return;
-      const p = this.players.get(chip.dataset.id);
-      if (p && confirm(`¿Expulsar a ${p.name}?`)) {
-        if (p.conn) this.reject(p.conn, 'El anfitrión te ha expulsado de la partida.');
-        clearTimeout(p.expiryTimer);
-        this.players.delete(chip.dataset.id);
-        this.renderPlayerChips();
-      }
+      if (chip) this.kickPlayer(chip.dataset.id);
     };
+    $('#host-controls').hidden = false;
+    this.renderControls();
+  }
+
+  initControls() {
+    $('#hc-lock').checked = false;
+    $('#hc-approve').checked = false;
+    $('#hc-capacity').value = String(this.capacity);
+    $('#hc-status').textContent = '';
+    $('#hc-lock').onchange = e => {
+      this.locked = e.target.checked;
+      if (this.locked) {
+        for (const conn of this.pending.keys()) this.reject(conn, 'El anfitrión ha bloqueado la sala.');
+        this.pending.clear();
+      }
+      this.renderControls();
+    };
+    $('#hc-approve').onchange = e => { this.approval = e.target.checked; this.renderControls(); };
+    $('#hc-capacity').onchange = e => {
+      const value = Number(e.target.value);
+      if (Number.isInteger(value) && value >= 1 && value <= MAX_PLAYERS) this.capacity = value;
+      e.target.value = String(this.capacity);
+      this.renderControls();
+    };
+    $('#hc-requests').onclick = e => {
+      const button = e.target.closest('[data-request]'); if (!button) return;
+      const entry = [...this.pending.entries()].find(([, request]) => request.id === button.dataset.request);
+      if (!entry) return;
+      const [conn, request] = entry; this.pending.delete(conn);
+      if (button.dataset.action === 'approve') this.handleJoin(conn, request.data, true);
+      else this.reject(conn, 'El anfitrión ha rechazado tu entrada.');
+      this.renderControls();
+    };
+    $('#hc-players').onclick = e => {
+      const button = e.target.closest('[data-kick]'); if (button) this.kickPlayer(button.dataset.kick);
+    };
+    const csv = () => { exportReport(this.report); };
+    $('#hc-csv').onclick = csv;
+    $('#hp-csv').onclick = csv;
+  }
+
+  renderControls() {
+    if (this.destroyed) return;
+    $('#hc-count').textContent = `${this.players.size}/${this.capacity}`;
+    $('#hc-pending').textContent = this.pending.size;
+    $('#hc-status').textContent = this.locked ? 'Sala bloqueada. Las sesiones existentes pueden reconectar.' : this.players.size >= this.capacity ? 'Aforo completo. Bajar el aforo no expulsa participantes.' : '';
+    $('#hc-requests').innerHTML = [...this.pending.values()].map(r => `<li>${esc(r.name)} <button class="btn" data-request="${r.id}" data-action="approve">Admitir</button><button class="btn danger" data-request="${r.id}" data-action="reject">Rechazar</button></li>`).join('');
+    $('#hc-players').innerHTML = [...this.players.values()].map(p => `<li>${esc(p.name)}${p.conn ? '' : ' (reconectando…)'} <button class="btn danger" data-kick="${p.id}" aria-label="Expulsar a ${esc(p.name)}">Expulsar</button></li>`).join('');
+  }
+
+  kickPlayer(id) {
+    const p = this.players.get(id);
+    if (!p || !confirm(`¿Expulsar a ${p.name}?`)) return;
+    if (p.conn) this.reject(p.conn, 'El anfitrión te ha expulsado de la partida.');
+    clearTimeout(p.expiryTimer);
+    this.players.delete(id);
+    if (this.phase === 'lobby') this.renderPlayerChips();
+    if (this.phase === 'question') this.checkAllAnswered();
+    this.renderControls();
+  }
+
+  persistReport() {
+    const error = saveReport(this.report);
+    this.reportUnsaved = !!error;
+    $('#host-report-status').textContent = error || 'Informe guardado en este navegador.';
   }
 
   renderPlayerChips() {
@@ -277,6 +368,8 @@ export class HostGame {
     this.qIndex = i;
     this.phase = 'question';
     const q = this.question();
+    this.answerOrder = questionType(q) === 'order' ? shuffledIndices(q.answers.length) : q.answers.map((_, index) => index);
+    this.questionPlayers = [...this.players.values()];
     for (const p of this.players.values()) {
       p.choice = null;
       p.answerMs = 0;
@@ -292,8 +385,10 @@ export class HostGame {
     $('#hq-progress').textContent = `Pregunta ${i + 1} de ${this.quiz.questions.length}`;
     $('#hq-text').textContent = q.text;
     $('#hq-answered').textContent = '0';
-    $('#hq-grid').innerHTML = q.answers.map((a, k) => `
-      <div class="answer-tile c${k}"><span class="shape">${SHAPES[k]}</span>${esc(a.text)}</div>`).join('');
+    $('#hq-media').innerHTML = mediaHTML(q.media);
+    $('#hq-type').textContent = QUESTION_TYPES[questionType(q)];
+    $('#hq-grid').innerHTML = this.answerOrder.map((index, k) => { const a = q.answers[index]; return `
+      <div class="answer-option"><div class="answer-tile c${k}"><span class="shape">${SHAPES[k]}</span>${esc(a.text)}</div>${mediaHTML(a.media)}</div>`; }).join('');
     $('#hq-skip').onclick = () => this.endQuestion();
     showSub('view-host', 'host-question');
 
@@ -315,35 +410,29 @@ export class HostGame {
     clearInterval(this.ticker);
 
     const q = this.question();
-    const correctSet = new Set(q.answers.map((a, k) => a.correct ? k : -1).filter(k => k >= 0));
-    for (const p of this.players.values()) {
-      if (p.joinedAtQ === this.qIndex) continue;
-      p.lastGotIt = p.choice !== null && correctSet.has(p.choice);
+    const type = questionType(q);
+    for (const p of this.questionPlayers) {
+      p.lastGotIt = isCorrect(q, p.choice) === true;
       const result = scoreAnswer({ correct: p.lastGotIt, elapsedMs: p.answerMs,
-        durationMs: q.time * 1000, mode: q.points, streak: p.streak });
+        durationMs: q.time * 1000, mode: q.points, streak: p.streak, survey: type === 'poll' });
       p.streak = result.streak;
       p.lastPts = result.points;
       p.score += result.points;
     }
+    recordQuestion(this.report, q, this.qIndex, this.questionPlayers);
+    this.persistReport();
     for (const p of this.players.values()) {
       if (p.joinedAtQ !== this.qIndex) send(p.conn, this.resultMessage(p));
     }
-
-    /* host reveal screen: histogram + correct answers */
-    const counts = q.answers.map((_, k) => [...this.players.values()].filter(p => p.choice === k).length);
+    const counts = q.answers.map((_, k) => this.questionPlayers.filter(p => Array.isArray(p.choice) ? p.choice.includes(k) : p.choice === k).length);
     const max = Math.max(1, ...counts);
     $('#hr-text').textContent = q.text;
-    $('#hr-histo').innerHTML = counts.map((c, k) => `
-      <div class="bar-wrap">
-        <span class="bar-count">${c}</span>
-        <div class="bar c${k}" style="height:${Math.round(120 * c / max) + 6}px"></div>
-        <span class="bar-shape">${SHAPES[k]}${correctSet.has(k) ? ' ✓' : ''}</span>
-      </div>`).join('');
-    $('#hr-grid').innerHTML = q.answers.map((a, k) => `
-      <div class="answer-tile c${k} ${correctSet.has(k) ? '' : 'faded'}">
-        <span class="shape">${SHAPES[k]}</span>${esc(a.text)}
-        ${correctSet.has(k) ? '<span class="mark">✓</span>' : ''}
-      </div>`).join('');
+    $('#hr-histo').innerHTML = ['written', 'order'].includes(type) ? '' : counts.map((c, k) => `
+      <div class="bar-wrap"><span class="bar-count">${c}</span><div class="bar c${k}" style="height:${Math.round(120 * c / max) + 6}px"></div><span class="bar-shape">${SHAPES[k]}</span></div>`).join('');
+    $('#hr-grid').innerHTML = type === 'written' ? '' : q.answers.map((a, k) => `
+      <div class="answer-option"><div class="answer-tile c${k}"><span class="shape">${type === 'order' ? k + 1 : SHAPES[k]}</span>${esc(a.text)}${['single', 'multi', 'boolean'].includes(type) && a.correct ? '<span class="mark" aria-label="Correcta">✓</span>' : ''}</div>${mediaHTML(a.media)}</div>`).join('');
+    $('#hr-solution').textContent = solutionText(q);
+    $('#hr-explanation').textContent = q.explanation || '';
     showSub('view-host', 'host-reveal');
 
     const last = this.qIndex === this.quiz.questions.length - 1;
@@ -369,6 +458,9 @@ export class HostGame {
 
   showPodium() {
     this.phase = 'end';
+    this.report.complete = true;
+    this.persistReport();
+    $('#hp-report').innerHTML = reportHTML(this.report);
     const ranked = this.ranking();
     for (const p of ranked) {
       send(p.conn, {
@@ -391,6 +483,9 @@ export class HostGame {
     showSub('view-host', 'host-podium');
     $('#hp-again').onclick = () => {
       for (const p of this.players.values()) { p.score = 0; p.streak = 0; }
+      this.report = newReport(this.quiz);
+      this.reportUnsaved = false;
+      $('#host-report-status').textContent = '';
       this.qIndex = -1;
       for (const p of this.players.values()) { p.choice = null; p.lastPts = 0; p.lastGotIt = false; p.joinedAtQ = -1; }
       this.renderLobby();
@@ -400,6 +495,7 @@ export class HostGame {
 
   destroy() {
     this.destroyed = true;
+    $('#host-controls').hidden = true;
     clearInterval(this.ticker);
     clearTimeout(this.retryTimer);
     clearTimeout(this.openTimer);
@@ -407,6 +503,7 @@ export class HostGame {
     for (const p of this.players.values()) clearTimeout(p.expiryTimer);
     for (const state of this.connections.values()) clearTimeout(state.timeout);
     if (this.peer) this.peer.destroy();
+    this.pending.clear();
     this.connections.clear();
     this.players.clear();
   }

@@ -17,7 +17,7 @@ test('migrates the unversioned library on save, preserving IDs and content', () 
   assert.deepEqual(lib.get(), quizzes);
   assert.ok(Array.isArray(JSON.parse(store.getItem(LS_KEY))));
   lib.save(quizzes);
-  assert.equal(JSON.parse(store.getItem(LS_KEY)).version, 2);
+  assert.equal(JSON.parse(store.getItem(LS_KEY)).version, 3);
   assert.deepEqual(parseLibrary(lib.backup()), quizzes);
 });
 test('corrupt, unsupported and wrongly shaped storage are never overwritten', () => {
@@ -62,13 +62,14 @@ test('imports reject nulls, invalid flags, huge files, question overflow and inv
   const q = sampleQuiz();
   const imported = importQuizJson(JSON.stringify(q));
   assert.notEqual(imported.id, q.id);
-  assert.deepEqual(imported.questions, q.questions);
+  assert.deepEqual(imported.questions.map(({ type, explanation, accepted, media, ...item }) => item), q.questions);
+  assert.equal(imported.questions[0].type, 'single');
   for (const mutation of [
     q => q.questions.push(null), q => q.questions[0].answers.push(null),
     q => q.questions[0].answers[0].correct = 'false', q => q.questions[0].time = -1,
     q => q.questions = Array(201).fill(q.questions[0]), q => q.title = 'a'.repeat(81),
   ]) { const data = structuredClone(q); mutation(data); assert.throws(() => importQuizJson(JSON.stringify(data))); }
-  assert.throws(() => importQuizJson(' '.repeat(2 * 1024 * 1024 + 1)));
+  assert.throws(() => importQuizJson(' '.repeat(8 * 1024 * 1024 + 1)));
 });
 test('routes tolerate malformed encodings and reject partial or foreign routes', () => {
   for (const path of ['#%E0%A4%A', '#join/123', '#joinXYZ', '#editor/../../x', '#unknown']) assert.equal(parseRoute(path).view, 'home');
@@ -84,7 +85,7 @@ test('scoring preserves streak caps, double points and no-point rounds', () => {
 });
 test('protocol rejects coerced choices, oversized and malformed messages', () => {
   assert.equal(validClientMessage({ t: 'a', i: 0, c: null }), false);
-  assert.equal(validClientMessage({ t: 'a', i: 0, c: '0' }), false);
+  assert.equal(validClientMessage({ t: 'a', i: 0, c: '0' }), true);
   assert.equal(validClientMessage({ t: 'join', name: 'a'.repeat(21) }), false);
   assert.equal(validHostMessage({ t: 'q', answers: null }), false);
   assert.equal(validHostMessage({ t: 'reveal', points: NaN }), false);
