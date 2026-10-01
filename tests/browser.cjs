@@ -113,7 +113,7 @@ fs.mkdirSync(path.join(root, 'test-results'), { recursive: true });
     await corrupt.locator('#lib-new').click(); await corrupt.locator('#ed-title').fill('Rescate');
     assert.equal(await corrupt.evaluate(() => localStorage.getItem('quizparty.quizzes.v1')), '{broken');
     const download = corrupt.waitForEvent('download'); await corrupt.locator('#storage-backup').click();
-    assert.equal((await download).suggestedFilename(), 'quizparty-biblioteca.json');
+    assert.equal((await download).suggestedFilename(), 'quizlab-biblioteca.json');
     assert.deepEqual(errors, []);
     console.log('Browser OK: multi-player game, signaling reconnect, reload/resume, replay, navigation guard, storage recovery, labels, keyboard and mobile reflow. Transport simulated.');
   } finally { await browser.close(); }

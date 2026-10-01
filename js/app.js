@@ -66,9 +66,9 @@ function init() {
     $('#storage-message').textContent = e.detail.message;
     $('#storage-original').hidden = !e.detail.hasRaw;
   });
-  $('#storage-backup').addEventListener('click', () => download(library.backup(), 'quizparty-biblioteca.json'));
-  $('#lib-backup').addEventListener('click', () => download(library.backup(), 'quizparty-biblioteca.json'));
-  $('#storage-original').addEventListener('click', () => download(library.original() || '', 'quizparty-original.json'));
+  $('#storage-backup').addEventListener('click', () => download(library.backup(), 'quizlab-biblioteca.json'));
+  $('#lib-backup').addEventListener('click', () => download(library.backup(), 'quizlab-biblioteca.json'));
+  $('#storage-original').addEventListener('click', () => download(library.original() || '', 'quizlab-original.json'));
   window.addEventListener('beforeunload', e => {
     if (library.isDirty()) { e.preventDefault(); e.returnValue = ''; }
   });
