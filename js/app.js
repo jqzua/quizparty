@@ -1,18 +1,30 @@
+import { $, esc, showView, download } from './util.js';
+import { cleanupRoute, parseRoute, permitNavigation } from './navigation.js';
+import { getQuizzes, newQuiz, upsertQuiz, importFile, exportQuiz, getQuiz, deleteQuiz, library } from './store.js';
+import { renderEditor, initEditorEvents } from './editor.js';
+import { startHost } from './host.js';
+import { playerShowJoinForm, initPlayerEvents } from './player.js';
+import { MAX_LIBRARY_BYTES } from './config.js';
 'use strict';
 
-/* Hash router. Each route may register a cleanup (e.g. tear down peer connections)
-   that runs before the next route renders. */
-let routeCleanup = null;
-function setCleanup(fn) { routeCleanup = fn; }
-
+let currentHash = '';
 function route() {
-  if (routeCleanup) { try { routeCleanup(); } catch (e) {} routeCleanup = null; }
-  const h = decodeURIComponent(location.hash.slice(1));
-  if (h === 'library') renderLibrary();
-  else if (h.startsWith('editor/')) renderEditor(h.slice(7));
-  else if (h.startsWith('host/')) startHost(h.slice(5));
-  else if (h.startsWith('join')) renderJoin(h.split('/')[1] || '');
-  else renderHome();
+  if (!permitNavigation()) {
+    history.replaceState(null, '', location.pathname + location.search + currentHash);
+    return;
+  }
+  cleanupRoute();
+  const target = parseRoute(location.hash);
+  currentHash = location.hash;
+  if (target.view === 'library') renderLibrary();
+  else if (target.view === 'editor') renderEditor(target.id);
+  else if (target.view === 'host') startHost(target.id);
+  else if (target.view === 'join') renderJoin(target.pin);
+  else {
+    currentHash = '';
+    history.replaceState(null, '', location.pathname + location.search);
+    renderHome();
+  }
 }
 
 function renderHome() {
@@ -25,19 +37,19 @@ function renderLibrary() {
   const list = $('#lib-list');
   const quizzes = getQuizzes();
   if (!quizzes.length) {
-    list.innerHTML = '<p class="empty-note">No quizzes yet — create one!</p>';
+    list.innerHTML = '<p class="empty-note">Todavía no hay cuestionarios. ¡Crea uno!</p>';
     return;
   }
   list.innerHTML = quizzes.map(q => `
-    <div class="quiz-item" data-id="${q.id}">
+    <div class="quiz-item" data-id="${esc(q.id)}">
       <div class="qi-info">
-        <b>${esc(q.title.trim() || 'Untitled quiz')}</b>
-        <small>${q.questions.length} question${q.questions.length === 1 ? '' : 's'}</small>
+        <b>${esc(q.title.trim() || 'Cuestionario sin título')}</b>
+        <small>${q.questions.length} pregunta${q.questions.length === 1 ? '' : 's'}</small>
       </div>
-      <button class="btn primary" data-act="host">Host ▶</button>
-      <button class="btn" data-act="edit">Edit</button>
-      <button class="btn" data-act="export">Export</button>
-      <button class="btn danger" data-act="del">Delete</button>
+      <button class="btn primary" data-act="host">Organizar ▶</button>
+      <button class="btn" data-act="edit">Editar</button>
+      <button class="btn" data-act="export">Exportar</button>
+      <button class="btn danger" data-act="del">Eliminar</button>
     </div>`).join('');
 }
 
@@ -46,7 +58,20 @@ function renderJoin(pin) {
   playerShowJoinForm(pin);
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+function init() {
+  document.querySelectorAll('[data-route]').forEach(button => button.addEventListener('click', () => { location.hash = button.dataset.route; }));
+  document.querySelectorAll('[data-reload]').forEach(button => button.addEventListener('click', () => location.reload()));
+  document.addEventListener('storage-status', e => {
+    $('#storage-warning').hidden = !e.detail.message;
+    $('#storage-message').textContent = e.detail.message;
+    $('#storage-original').hidden = !e.detail.hasRaw;
+  });
+  $('#storage-backup').addEventListener('click', () => download(library.backup(), 'quizparty-biblioteca.json'));
+  $('#lib-backup').addEventListener('click', () => download(library.backup(), 'quizparty-biblioteca.json'));
+  $('#storage-original').addEventListener('click', () => download(library.original() || '', 'quizparty-original.json'));
+  window.addEventListener('beforeunload', e => {
+    if (library.isDirty()) { e.preventDefault(); e.returnValue = ''; }
+  });
   /* Home */
   const goJoin = () => {
     const pin = $('#home-pin').value.replace(/\D/g, '');
@@ -68,11 +93,11 @@ document.addEventListener('DOMContentLoaded', () => {
     e.target.value = '';
     if (!file) return;
     try {
-      const quiz = importQuizJson(await file.text());
-      upsertQuiz(quiz);
+      if (file.size > MAX_LIBRARY_BYTES) throw new Error('El archivo supera el límite de 20 MB para bibliotecas.');
+      importFile(await file.text());
       renderLibrary();
     } catch (err) {
-      alert('Could not import: ' + err.message);
+      alert('No se ha podido importar: ' + err.message);
     }
   });
   $('#lib-list').addEventListener('click', e => {
@@ -85,7 +110,7 @@ document.addEventListener('DOMContentLoaded', () => {
     else if (act === 'export') exportQuiz(getQuiz(id));
     else if (act === 'del') {
       const quiz = getQuiz(id);
-      if (confirm(`Delete "${quiz.title.trim() || 'Untitled quiz'}"?`)) {
+      if (confirm(`¿Eliminar "${quiz.title.trim() || 'Cuestionario sin título'}"?`)) {
         deleteQuiz(id);
         renderLibrary();
       }
@@ -97,4 +122,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   window.addEventListener('hashchange', route);
   route();
-});
+}
+
+init();

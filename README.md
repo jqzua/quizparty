@@ -1,71 +1,91 @@
 # 🎉 QuizParty
 
-**Free, open-source Kahoot-style live quiz game — with no backend at all.**
+Cuestionarios en directo, gratuitos y de código abierto. El anfitrión muestra la partida en una pantalla y los participantes entran desde el móvil mediante PIN o QR.
 
-Put the host screen on a projector or TV, and everyone in the room joins on their phone with a 6-digit game PIN (or by scanning a QR code). Answer fast, climb the scoreboard, win the podium.
+La aplicación es un sitio estático con módulos JavaScript nativos. El navegador del anfitrión mantiene la partida y calcula las puntuaciones. No necesita backend propio, cuentas, compilación ni suscripciones. PeerJS proporciona señalización pública y WebRTC transporta los mensajes entre dispositivos. La señalización, STUN, el CDN y las fuentes son servicios externos; no se garantiza su disponibilidad.
 
-**▶ Play now: https://arvindfroi.github.io/quizparty/**
-
-## How can it work without a server?
-
-The host's browser *is* the game server. QuizParty uses **WebRTC data channels** (via [PeerJS](https://peerjs.com)): every player's phone connects directly to the host's browser, peer-to-peer. The only third-party involvement is PeerJS's free public signaling broker, which is used once per player to *establish* the connection — after that, all game traffic flows directly between the devices. No accounts, no database, no game data ever touches a server.
-
-Your quizzes are stored in your browser's localStorage and can be exported/imported as JSON files.
-
-## Features
-
-- 🎨 Kahoot-style gameplay: colored shape answers, countdown timer, speed-based scoring (500–1000 pts), streak bonuses, scoreboard between questions, podium at the end
-- ✏️ Quiz editor: 2–4 answers per question, multiple correct answers, per-question time limit (5–90 s) and point multiplier (standard / double / none)
-- 📱 Players join with a PIN or QR code — nothing to install
-- 🔁 Play again with the same room, late joiners welcome mid-game
-- 📦 Export / import quizzes as JSON — share them however you like
-- 🆓 100% free and static: fork it, host it on any static file host (GitHub Pages works out of the box)
-
-## Run it yourself
-
-It's a plain static site — no build step, no dependencies to install:
+## Ejecutar
 
 ```bash
-git clone https://github.com/arvindfroi/quizparty.git
-cd quizparty
-python -m http.server 8080   # or any static file server
+python -m http.server 8080
 ```
 
-Then open http://localhost:8080. Note that players on *other devices* need to reach your page over HTTPS (or your LAN IP) — the easiest path is enabling GitHub Pages on your fork.
+Abre `http://localhost:8080`. Para publicar, sirve el directorio mediante HTTPS en un alojamiento estático. Los módulos necesitan HTTP(S), no `file://`. Las dependencias npm son solo para desarrollo y pruebas; no se necesita `node_modules` para publicar.
 
-### Self-hosting the signaling too
+## Partidas y reconexiones
 
-If you don't want to rely on the free PeerJS cloud broker, run your own [PeerServer](https://github.com/peers/peerjs-server) and pass its host/port to the two `new Peer(...)` calls in `js/host.js` and `js/player.js`.
+- Editor de preguntas de texto con 2–4 respuestas, tiempos de 5–90 segundos y puntos normales, dobles o desactivados. Cada participante elige una opción; varias opciones pueden ser válidas.
+- Puntos por rapidez, rachas, clasificación y podio; repetición con la misma sala.
+- Un corte de señalización no reinicia la pregunta ni el temporizador.
+- Un participante desconectado conserva su estado durante 60 segundos desde que el anfitrión detecta el corte. La reconexión automática y la recarga de la misma pestaña usan un token guardado en `sessionStorage`. Si este almacenamiento está bloqueado, la recuperación solo funciona mientras la página siga abierta. Al expirar, hay que volver a entrar y se comienza sin los puntos anteriores.
+- Al reconectar se recuperan la pregunta y el tiempo restante, la respuesta ya registrada o los resultados. Las entradas nuevas a mitad de pregunta esperan a la siguiente.
+- El anfitrión debe mantener abierta su pestaña: al cerrarla o recargarla termina la sala. Se solicita confirmación al salir, sujeta a las restricciones del navegador.
+- El plazo y la puntuación dependen del reloj monotónico del anfitrión y de la llegada de la respuesta. Se muestra la latencia de ida y vuelta; no se compensa con tiempos enviados por el participante. Una conexión lenta puede reducir los puntos o llegar fuera de plazo.
 
-## Limitations (honesty corner)
+## Biblioteca y copias
 
-- The host tab must stay open — closing it ends the game (there is no server to keep it alive).
-- WebRTC needs a working internet connection for connection setup; very restrictive corporate/school firewalls that block WebRTC entirely will block the game too.
-- Tested comfortably with room-sized groups (tens of players). It is not built for 1,000-player arenas.
+Los cuestionarios se guardan localmente con un formato versionado. Las bibliotecas antiguas se leen y se migran al guardar, conservando sus identificadores. Los datos inválidos nunca se sustituyen automáticamente por el ejemplo.
 
-## Quiz JSON format
+Si falta espacio, el almacenamiento está bloqueado o otra pestaña ha cambiado la biblioteca, se muestra un aviso y los cambios quedan en memoria. **Descarga una copia antes de cerrar o recargar.** El aviso permite descargar los cambios y, si se pudo leer, el archivo original. La biblioteca ofrece también una copia de seguridad en cualquier momento.
+
+«Importar» admite cuestionarios individuales (hasta 2 MB y 200 preguntas) y copias de biblioteca (hasta 20 MB). Las copias se añaden a la biblioteca con identificadores nuevos; no reemplazan los cuestionarios existentes. Los borradores sin completar se pueden importar y editar, pero no iniciar hasta corregirlos. Las descargas de datos corruptos se conservan para su reparación manual.
+
+Formato de cuestionario individual:
 
 ```json
 {
-  "title": "My quiz",
-  "questions": [
-    {
-      "text": "What is 2 + 2?",
-      "answers": [
-        { "text": "3", "correct": false },
-        { "text": "4", "correct": true }
-      ],
-      "time": 20,
-      "points": "standard"
-    }
-  ]
+  "title": "Mi cuestionario",
+  "questions": [{
+    "text": "¿Cuánto es 2 + 2?",
+    "answers": [
+      { "text": "3", "correct": false },
+      { "text": "4", "correct": true }
+    ],
+    "time": 20,
+    "points": "standard"
+  }]
 }
 ```
 
-## Contributing
+Una copia de biblioteca usa `{ "version": 2, "quizzes": [...] }` y conserva los IDs en su contenido.
 
-Issues and PRs are welcome. The whole app is vanilla HTML/CSS/JS — if you can read a `<script>` tag, you can hack on it.
+## Configuración de red y límites
 
-## License
+El protocolo de partida usa el prefijo `quizparty-v2-`; todos los dispositivos deben cargar esta versión de la aplicación.
 
-[MIT](LICENSE) — do whatever you like. QuizParty is not affiliated with Kahoot! in any way; it's an independent open-source homage to the live-quiz format.
+`js/config.js` centraliza el servidor de señalización, ICE, los plazos y los límites. Por defecto:
+
+- Señalización TLS: `0.peerjs.com:443`, ruta `/`.
+- STUN: `stun:stun.l.google.com:19302`.
+- Sin TURN, sin credenciales ni servicios de pago. Redes con NAT o cortafuegos restrictivos pueden impedir la conexión.
+- Límite preventivo de 50 participantes retenidos, 100 conexiones simultáneas, 30 mensajes por segundo y conexión, y 8 segundos para completar el alta.
+
+**50 es un límite de protección, no un aforo garantizado.** La capacidad real depende de los dispositivos y la red. No pongas credenciales TURN permanentes en un fichero público. El procedimiento de comprobación en redes reales está en [Mejoras técnicas](docs/MEJORAS_TECNICAS.md).
+
+## Desarrollo y pruebas
+
+Requiere Node.js 22.15 o posterior para las herramientas de desarrollo.
+
+```bash
+npm ci
+npm run check
+npm test
+npx playwright install chromium
+npm run test:browser
+```
+
+Para utilizar un Chromium ya instalado:
+
+```bash
+CHROMIUM_PATH=/usr/bin/chromium npm run test:browser
+```
+
+`check` ejecuta ESLint, comprueba sintaxis, enlaces entre módulos, recursos locales y ausencia de manejadores HTML inline. Las pruebas de Node cubren almacenamiento, importación, protocolo, puntuación y el ciclo de partida. Las de Chromium recorren la interfaz con varias pestañas y un transporte simulado; no prueban señalización ni ICE reales.
+
+Distribución del código: `config` (configuración), `protocol` (mensajes), `scoring` (puntuación), `schema`/`storage`/`store` (datos), `navigation` (rutas y limpieza), `util` (interfaz compartida), `editor`, `host`, `player` y `app` (pantallas y coordinación).
+
+Consulta el [estado de las mejoras](docs/MEJORAS_TECNICAS.md) y la [revisión inicial](docs/REVISION.md).
+
+## Licencia
+
+[MIT](LICENSE). QuizParty no está afiliado a Kahoot.
