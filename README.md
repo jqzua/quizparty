@@ -14,9 +14,9 @@ Abre `http://localhost:8080`. Para publicar, sirve el directorio mediante HTTPS 
 
 ## Partidas y reconexiones
 
-- Editor de preguntas de texto con 2–4 respuestas, tiempos de 5–90 segundos y puntos normales, dobles o desactivados. Cada participante elige una opción; varias opciones pueden ser válidas.
-- Puntos por rapidez, rachas, clasificación y podio; repetición con la misma sala.
-- Un corte de señalización no reinicia la pregunta ni el temporizador.
+- Editor con elección única, selección múltiple, verdadero/falso, ordenación, respuesta escrita y encuestas; tiempos de 5–90 segundos, explicaciones y multimedia. Consulta las reglas de puntuación y límites en [Funciones de QuizLab](docs/FUNCIONES.md).
+- Puntos por rapidez, rachas, clasificación y podio; repetición con la misma sala. Informes por pregunta y participante, historial local y exportación CSV.
+- Bloqueo de sala, aprobación de entradas, aforo configurable (1–50) y expulsión durante toda la partida. Un corte de señalización no reinicia la pregunta ni el temporizador.
 - Un participante desconectado conserva su estado durante 60 segundos desde que el anfitrión detecta el corte. La reconexión automática y la recarga de la misma pestaña usan un token guardado en `sessionStorage`. Si este almacenamiento está bloqueado, la recuperación solo funciona mientras la página siga abierta. Al expirar, hay que volver a entrar y se comienza sin los puntos anteriores.
 - Al reconectar se recuperan la pregunta y el tiempo restante, la respuesta ya registrada o los resultados. Las entradas nuevas a mitad de pregunta esperan a la siguiente.
 - El anfitrión debe mantener abierta su pestaña: al cerrarla o recargarla termina la sala. Se solicita confirmación al salir, sujeta a las restricciones del navegador.
@@ -28,7 +28,7 @@ Los cuestionarios se guardan localmente con un formato versionado. Las bibliotec
 
 Si falta espacio, el almacenamiento está bloqueado o otra pestaña ha cambiado la biblioteca, se muestra un aviso y los cambios quedan en memoria. **Descarga una copia antes de cerrar o recargar.** El aviso permite descargar los cambios y, si se pudo leer, el archivo original. La biblioteca ofrece también una copia de seguridad en cualquier momento.
 
-«Importar» admite cuestionarios individuales (hasta 2 MB y 200 preguntas) y copias de biblioteca (hasta 20 MB). Las copias se añaden a la biblioteca con identificadores nuevos; no reemplazan los cuestionarios existentes. Los borradores sin completar se pueden importar y editar, pero no iniciar hasta corregirlos. Las descargas de datos corruptos se conservan para su reparación manual.
+«Importar» admite cuestionarios individuales (hasta 8 MB y 200 preguntas) y copias de biblioteca (hasta 20 MB). Las copias se añaden a la biblioteca con identificadores nuevos; no reemplazan los cuestionarios existentes. Los borradores sin completar se pueden importar y editar, pero no iniciar hasta corregirlos. Las descargas de datos corruptos se conservan para su reparación manual.
 
 Formato de cuestionario individual:
 
@@ -47,11 +47,11 @@ Formato de cuestionario individual:
 }
 ```
 
-Una copia de biblioteca usa `{ "version": 2, "quizzes": [...] }` y conserva los IDs en su contenido.
+Una copia de biblioteca usa `{ "version": 3, "quizzes": [...] }` y conserva los IDs en su contenido.
 
 ## Configuración de red y límites
 
-El protocolo de partida usa el prefijo `quizparty-v2-`; todos los dispositivos deben cargar esta versión de la aplicación.
+El protocolo de partida usa el prefijo `quizlab-v3-`; todos los dispositivos deben cargar esta versión de la aplicación.
 
 `js/config.js` centraliza el servidor de señalización, ICE, los plazos y los límites. Por defecto:
 
@@ -82,7 +82,7 @@ CHROMIUM_PATH=/usr/bin/chromium npm run test:browser
 
 `check` ejecuta ESLint, comprueba sintaxis, enlaces entre módulos, recursos locales y ausencia de manejadores HTML inline. Las pruebas de Node cubren almacenamiento, importación, protocolo, puntuación y el ciclo de partida. Las de Chromium recorren la interfaz con varias pestañas y un transporte simulado; no prueban señalización ni ICE reales.
 
-Distribución del código: `config` (configuración), `protocol` (mensajes), `scoring` (puntuación), `schema`/`storage`/`store` (datos), `navigation` (rutas y limpieza), `util` (interfaz compartida), `editor`, `host`, `player` y `app` (pantallas y coordinación).
+Distribución del código: `config` (configuración), `protocol` (mensajes), `questions`/`scoring` (tipos y puntuación), `media` (multimedia), `reports` (informes e historial), `schema`/`storage`/`store` (datos), `navigation` (rutas y limpieza), `util` (interfaz compartida), `editor`, `host`, `player` y `app` (pantallas y coordinación).
 
 Consulta el [estado de las mejoras](docs/MEJORAS_TECNICAS.md) y la [revisión inicial](docs/REVISION.md).
 

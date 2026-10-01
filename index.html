@@ -45,6 +45,7 @@
       <button class="btn ghost" data-route="">← Inicio</button>
       <h1>Mis cuestionarios</h1>
       <div class="head-actions">
+        <button class="btn" data-route="reports">Historial de partidas</button>
         <button id="lib-backup" class="btn">Copia de seguridad</button>
         <button id="lib-import" class="btn">Importar</button>
         <button id="lib-new" class="btn primary">+ Nuevo cuestionario</button>
@@ -52,6 +53,13 @@
     </header>
     <div id="lib-list" class="quiz-list"></div>
     <input aria-label="Importar cuestionario o copia de seguridad" id="lib-file" type="file" accept=".json,application/json" hidden>
+  </div>
+</section>
+
+<section id="view-reports" class="view">
+  <div class="page wide">
+    <header class="page-head"><button class="btn" data-route="library">← Cuestionarios</button><h1>Historial de partidas</h1><button id="reports-backup" class="btn">Descargar historial original</button></header>
+    <p id="reports-status" role="status"></p><div id="reports-list"></div>
   </div>
 </section>
 
@@ -82,6 +90,13 @@
           </div>
         </div>
         <textarea aria-label="Enunciado de la pregunta" id="ed-qtext" rows="2" placeholder="Escribe tu pregunta…" maxlength="200"></textarea>
+        <label>Tipo de pregunta <select id="ed-type">
+          <option value="single">Elección única</option><option value="multi">Selección múltiple</option>
+          <option value="boolean">Verdadero / falso</option><option value="order">Ordenar</option>
+          <option value="written">Respuesta escrita</option><option value="poll">Encuesta</option>
+        </select></label>
+        <div id="ed-media"></div>
+        <p id="ed-media-error" class="err" role="alert"></p>
         <div class="q-opts">
           <label>Tiempo límite
             <select id="ed-qtime">
@@ -98,9 +113,12 @@
             </select>
           </label>
         </div>
+        <div id="ed-written" hidden><label for="ed-accepted">Respuestas escritas aceptadas (una por línea, hasta 10)</label><textarea id="ed-accepted" maxlength="1610"></textarea></div>
         <div id="ed-answers"></div>
         <button id="ed-adda" class="btn full">+ Añadir respuesta</button>
-        <p class="muted hint">Marca la casilla de cada respuesta correcta (al menos una). Cada participante podrá elegir una sola respuesta.</p>
+        <p id="ed-type-hint" class="muted hint"></p>
+        <label for="ed-explanation">Explicación que se mostrará después de responder</label>
+        <textarea id="ed-explanation" maxlength="1000" placeholder="Explica por qué la respuesta es correcta…"></textarea>
       </div>
     </div>
   </div>
@@ -109,6 +127,20 @@
 <!-- ============ HOST ============ -->
 <section id="view-host" class="view dark-bg">
   <p id="host-network" class="network-status" role="status"></p>
+  <details id="host-controls" class="room-tools" hidden>
+    <summary>Control de sala · <span id="hc-count">0</span> participantes · <span id="hc-pending">0</span> solicitudes</summary>
+    <div class="room-options">
+      <label><input id="hc-lock" type="checkbox"> Bloquear nuevas entradas</label>
+      <label><input id="hc-approve" type="checkbox"> Aprobar cada entrada</label>
+      <label>Aforo <input id="hc-capacity" type="number" min="1" max="50" value="50"></label>
+    </div>
+    <p id="hc-status" role="status"></p>
+    <p>Las solicitudes pendientes se resuelven con Admitir o Rechazar, aunque desactives la aprobación para nuevas entradas.</p>
+    <h3>Solicitudes pendientes</h3><ul id="hc-requests"></ul>
+    <h3>Participantes</h3><ul id="hc-players"></ul>
+    <button id="hc-csv" class="btn">Descargar informe parcial CSV</button>
+    <p id="host-report-status" role="status"></p>
+  </details>
 
   <div id="host-connecting" class="hsub">
     <div class="center-box"><div class="spinner"></div><p>Abriendo la sala…</p></div>
@@ -140,6 +172,8 @@
       <span class="q-progress" id="hq-progress"></span>
       <h2 id="hq-text"></h2>
     </div>
+    <div id="hq-media"></div>
+    <p id="hq-type" class="on-dark"></p>
     <div class="q-mid">
       <div class="timer-circle" id="hq-timer"></div>
       <div class="answered-pill"><span id="hq-answered" role="status">0</span><small>respuestas</small></div>
@@ -152,6 +186,7 @@
     <div class="q-top"><h2 id="hr-text"></h2></div>
     <div class="histo" id="hr-histo"></div>
     <div class="answer-grid" id="hr-grid"></div>
+    <p id="hr-solution" class="solution"></p><p id="hr-explanation" class="explanation"></p>
     <div class="next-bar"><button id="hr-next" class="btn primary big">Siguiente</button></div>
   </div>
 
@@ -165,6 +200,8 @@
     <h1 class="board-title">🏆 Podio</h1>
     <div class="podium" id="hp-podium"></div>
     <div class="board small" id="hp-rest"></div>
+    <article id="hp-report" class="card report"></article>
+    <button id="hp-csv" class="btn">Descargar informe CSV</button>
     <div class="next-bar">
       <button class="btn" data-route="library">Terminar</button>
       <button id="hp-again" class="btn primary">Volver a jugar</button>
@@ -202,7 +239,12 @@
       <span class="p-timer" id="pq-timer"></span>
     </div>
     <p class="p-qtext" id="pq-text" aria-live="polite"></p>
+    <div id="pq-media"></div>
+    <p id="pq-instructions" class="on-dark"></p>
     <div class="answer-grid player" id="pq-grid"></div>
+    <div id="pq-written" class="player-input" hidden><label for="pq-input">Tu respuesta</label><input id="pq-input" maxlength="160" autocomplete="off"></div>
+    <ol id="pq-order" class="order-list" hidden></ol>
+    <button id="pq-submit" class="btn primary big" hidden>Enviar respuesta</button>
   </div>
 
   <div id="play-answered" class="psub">
@@ -220,6 +262,7 @@
         <p id="pr-points" class="pr-points"></p>
         <p id="pr-streak" class="pr-streak"></p>
         <p id="pr-rank" class="on-dark"></p>
+        <p id="pr-solution" class="solution"></p><p id="pr-explanation" class="explanation"></p>
       </div>
     </div>
   </div>

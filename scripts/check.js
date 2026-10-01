@@ -11,3 +11,6 @@ const html = readFileSync('index.html', 'utf8');
 assert.ok(!/\son[a-z]+\s*=/i.test(html), 'No inline HTML event handlers');
 for (const match of html.matchAll(/(?:src|href)="((?:js|css)\/[^"?#]+)"/g)) assert.ok(existsSync(match[1]), match[1]);
 console.log('Syntax, module linking and static asset references OK.');
+
+const css = readFileSync('css/style.css', 'utf8');
+for (const match of css.matchAll(/url\("\.\.\/(assets\/[^"?#]+)"\)/g)) assert.ok(existsSync(match[1]), match[1]);

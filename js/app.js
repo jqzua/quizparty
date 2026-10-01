@@ -1,3 +1,4 @@
+import { renderReports, initReportEvents } from './reports.js';
 import { $, esc, showView, download } from './util.js';
 import { cleanupRoute, parseRoute, permitNavigation } from './navigation.js';
 import { getQuizzes, newQuiz, upsertQuiz, importFile, exportQuiz, getQuiz, deleteQuiz, library } from './store.js';
@@ -16,7 +17,8 @@ function route() {
   cleanupRoute();
   const target = parseRoute(location.hash);
   currentHash = location.hash;
-  if (target.view === 'library') renderLibrary();
+  if (target.view === 'reports') renderReports();
+  else if (target.view === 'library') renderLibrary();
   else if (target.view === 'editor') renderEditor(target.id);
   else if (target.view === 'host') startHost(target.id);
   else if (target.view === 'join') renderJoin(target.pin);
@@ -117,6 +119,7 @@ function init() {
     }
   });
 
+  initReportEvents();
   initEditorEvents();
   initPlayerEvents();
 

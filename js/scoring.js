@@ -1,4 +1,5 @@
-export function scoreAnswer({ correct, elapsedMs, durationMs, mode, streak }) {
+export function scoreAnswer({ correct, elapsedMs, durationMs, mode, streak, survey = false }) {
+  if (survey) return { points: 0, streak };
   if (!correct) return { points: 0, streak: 0 };
   const nextStreak = streak + 1;
   const multiplier = mode === 'double' ? 2 : mode === 'none' ? 0 : 1;
